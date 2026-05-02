@@ -1,0 +1,13 @@
+ALTER TABLE medical_center_doctor_schedule
+  ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'UPCOMING';
+
+UPDATE medical_center_doctor_schedule
+SET status = CASE
+  WHEN is_active = FALSE THEN 'COMPLETED'
+  WHEN date < CURRENT_DATE THEN 'COMPLETED'
+  WHEN date = CURRENT_DATE AND end_time <= CURRENT_TIME THEN 'COMPLETED'
+  WHEN date = CURRENT_DATE AND start_time <= CURRENT_TIME AND end_time > CURRENT_TIME THEN 'ACTIVE'
+  ELSE 'UPCOMING'
+END
+WHERE status IS NULL
+   OR status NOT IN ('UPCOMING', 'ACTIVE', 'COMPLETED');

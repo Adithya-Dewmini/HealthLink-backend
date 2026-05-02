@@ -1,0 +1,1 @@
+ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS is_seen BOOLEAN DEFAULT false;
