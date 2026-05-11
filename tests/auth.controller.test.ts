@@ -5,9 +5,19 @@ vi.mock("../src/services/auth.service", () => ({
   loginUserWithPassword: vi.fn(),
   setPasswordFromToken: vi.fn(),
 }));
+vi.mock("../src/services/audit.service", () => ({
+  createAuditLog: vi.fn(),
+  getAuditRequestContext: vi.fn(() => ({
+    actorUserId: 1,
+    actorRole: "receptionist",
+    ipAddress: "127.0.0.1",
+    userAgent: "vitest",
+  })),
+}));
 
 import { loginUser, setPassword } from "../src/controllers/auth.controller";
 import { loginUserWithPassword, setPasswordFromToken } from "../src/services/auth.service";
+import { createAuditLog } from "../src/services/audit.service";
 
 describe("auth controller", () => {
   beforeEach(() => {
@@ -57,6 +67,7 @@ describe("auth controller", () => {
       password: "StrongPass123",
       expoPushToken: "ExponentPushToken[test-token]",
     });
+    expect(createAuditLog).toHaveBeenCalled();
   });
 
   it("surfaces password setup validation errors", async () => {

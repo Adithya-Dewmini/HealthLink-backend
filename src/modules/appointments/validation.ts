@@ -1,9 +1,10 @@
 import pool from "../../config/db";
-import { env } from "../../config/env";
 import { BOOKING_STATUS } from "../../utils/bookingLifecycle";
 import type { BookingActionValidationResult, BookingSlotValidationInput } from "./types";
-
-const APP_TZ = env.appTz;
+import {
+  findBookableClinicSessionByTime,
+  isTimeWithinSessionSlots,
+} from "../../services/sessionDomain.service";
 
 const DATE_INPUT_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_INPUT_REGEX = /^\d{2}:\d{2}$/;
@@ -23,6 +24,12 @@ export const validateBookingMutationPayload = (date: unknown, time: unknown): Bo
   if (!TIME_INPUT_REGEX.test(normalizedTime)) {
     return { ok: false, message: "time must be in HH:MM format" };
   }
+  if (!isRealCalendarDate(normalizedDate)) {
+    return { ok: false, message: "date must be a valid calendar date" };
+  }
+  if (parseMinutes(normalizedTime) == null) {
+    return { ok: false, message: "time must be a valid 24-hour HH:MM value" };
+  }
 
   return { ok: true };
 };
@@ -30,36 +37,31 @@ export const validateBookingMutationPayload = (date: unknown, time: unknown): Bo
 const parseMinutes = (value: string) => {
   const [h, m] = value.split(":").map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return null;
   return h * 60 + m;
 };
 
-const buildSlotSet = (
-  availability: { start_time: string; end_time: string; max_patients?: number | null }[]
-) => {
-  const slotSet = new Set<string>();
-  for (const item of availability) {
-    const start = String(item.start_time).slice(0, 5);
-    const end = String(item.end_time).slice(0, 5);
-    const count = Number(item.max_patients ?? 0);
-    const startMinutes = parseMinutes(start);
-    const endMinutes = parseMinutes(end);
-    if (!count || count <= 0 || startMinutes == null || endMinutes == null) continue;
-
-    const interval = (endMinutes - startMinutes) / count;
-    if (interval <= 0) continue;
-
-    for (let i = 0; i < count; i += 1) {
-      const minutes = Math.round(startMinutes + interval * i);
-      const hours = Math.floor(minutes / 60);
-      const mins = minutes % 60;
-      slotSet.add(`${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`);
-    }
+const isRealCalendarDate = (value: string) => {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return false;
   }
-  return slotSet;
+
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return false;
+  }
+
+  return (
+    parsed.getFullYear() === year &&
+    parsed.getMonth() + 1 === month &&
+    parsed.getDate() === day
+  );
 };
 
 export const validateBookingSlot = async ({
   doctorId,
+  clinicId,
   date,
   time,
   excludeBookingId,
@@ -77,58 +79,38 @@ export const validateBookingSlot = async ({
     return { ok: false, message: "Cannot book slots in the past" };
   }
 
-  const dayName = requestDate.toLocaleDateString("en-US", { weekday: "long", timeZone: APP_TZ });
+  const session = await findBookableClinicSessionByTime(pool, {
+    doctorProfileId: doctorId,
+    clinicId,
+    date,
+    time,
+  });
+  if (session) {
+    if (!isTimeWithinSessionSlots(time, session)) {
+      return { ok: false, message: "Requested time is not part of this clinic session" };
+    }
 
-  const [workingDaysResult, availabilityResult] = await Promise.all([
-    pool.query(`SELECT day FROM doctor_working_days WHERE doctor_id = $1`, [doctorId]),
-    pool.query(
-      `
-      SELECT start_time, end_time, max_patients
-      FROM doctor_availability
-      WHERE doctor_id = $1 AND day = $2
-      `,
-      [doctorId, dayName]
-    ),
-  ]);
+    if (session.slot_duration <= 0) {
+      return { ok: false, message: "Clinic session is not configured correctly" };
+    }
 
-  const workingDays = workingDaysResult.rows.map((row) => String(row.day));
-  if (workingDays.length > 0 && !workingDays.includes(dayName)) {
-    return { ok: false, message: "Doctor is not available on this day" };
-  }
-
-  const availability = Array.isArray(availabilityResult.rows) ? availabilityResult.rows : [];
-  if (availability.length === 0) {
-    return { ok: false, message: "No availability for this day" };
-  }
-
-  const requestedMinutes = parseMinutes(String(time).slice(0, 5));
-  if (requestedMinutes == null) {
-    return { ok: false, message: "Invalid time format" };
-  }
-
-  const slotSet = buildSlotSet(availability);
-  if (!slotSet.has(String(time).slice(0, 5))) {
-    return { ok: false, message: "Requested time is not available" };
-  }
-
-  const capacity = slotSet.size;
-  if (capacity > 0) {
     const bookedCountResult = await pool.query(
       `
       SELECT COUNT(*) AS booked_count
       FROM bookings
-      WHERE doctor_id = $1 AND date = $2
-        AND COALESCE(UPPER(status), '') <> '${BOOKING_STATUS.CANCELLED}'
-        ${excludeBookingId ? "AND id <> $3" : ""}
+      WHERE session_id = $1
+        AND COALESCE(UPPER(status), '') NOT IN ('CANCELLED', 'MISSED')
+        ${excludeBookingId ? "AND id <> $2" : ""}
       `,
-      excludeBookingId ? [doctorId, date, excludeBookingId] : [doctorId, date]
+      excludeBookingId ? [session.id, excludeBookingId] : [session.id]
     );
 
     const bookedCount = Number(bookedCountResult.rows[0]?.booked_count ?? 0);
-    if (bookedCount >= capacity) {
-      return { ok: false, message: "No slots available for this day" };
+    if (bookedCount >= session.max_patients) {
+      return { ok: false, message: "No slots available for this clinic session" };
     }
-  }
 
-  return { ok: true };
+    return { ok: true };
+  }
+  return { ok: false, message: "No clinic-defined session is available for this slot" };
 };

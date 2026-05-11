@@ -18,6 +18,10 @@ export type CreateMedicineInput = {
   brandId: number;
   description: string | null;
   imageUrl: string | null;
+  genericName: string | null;
+  activeIngredient: string | null;
+  strength: string | null;
+  dosageForm: string | null;
   quantity: number;
   expiryDate: string;
   price: number;
@@ -190,6 +194,10 @@ export const validateCreateMedicinePayload = (body: any): CreateMedicineInput =>
   const brandId = validateMedicineId(body?.brand_id);
   const description = asTrimmedString(body?.description) || null;
   const imageUrl = asTrimmedString(body?.image_url) || null;
+  const genericName = asTrimmedString(body?.generic_name) || null;
+  const activeIngredient = asTrimmedString(body?.active_ingredient) || null;
+  const strength = asTrimmedString(body?.strength) || null;
+  const dosageForm = asTrimmedString(body?.dosage_form) || null;
   const quantity = asPositiveNumber(body?.quantity);
   const expiryDate = asTrimmedString(body?.expiry_date);
   const price = asPositiveNumber(body?.price);
@@ -220,6 +228,10 @@ export const validateCreateMedicinePayload = (body: any): CreateMedicineInput =>
     brandId,
     description,
     imageUrl,
+    genericName,
+    activeIngredient,
+    strength,
+    dosageForm,
     quantity,
     expiryDate,
     price,

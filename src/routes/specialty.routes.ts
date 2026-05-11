@@ -5,19 +5,18 @@ import {
   requireMedicalCenterAdmin,
 } from "../middleware/medicalCenterScope";
 import {
-  createSpecialtyController,
-  deleteSpecialtyController,
-  listSpecialtiesController,
-  updateSpecialtyController,
-} from "../controllers/specialty.controller";
+  createClinicSpecialtyController,
+  deleteClinicSpecialtyController,
+  listClinicSpecialtiesController,
+  updateClinicSpecialtyController,
+} from "../controllers/clinicSpecialty.controller";
 
 const router = express.Router();
 
 router.use(authenticateToken, requireMedicalCenterAdmin, checkActiveUserInCenter);
-
-router.get("/", listSpecialtiesController);
-router.post("/", createSpecialtyController);
-router.put("/:id", updateSpecialtyController);
-router.delete("/:id", deleteSpecialtyController);
+router.get("/", listClinicSpecialtiesController);
+router.post("/", createClinicSpecialtyController);
+router.put("/:id", updateClinicSpecialtyController);
+router.delete("/:id", deleteClinicSpecialtyController);
 
 export default router;

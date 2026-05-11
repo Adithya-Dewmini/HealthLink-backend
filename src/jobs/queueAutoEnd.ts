@@ -1,6 +1,7 @@
 import type { Server } from "socket.io";
 import pool from "../config/db";
 import { env } from "../config/env";
+import { emitClinicPublicQueueUpdate } from "../services/clinicRealtime.service";
 import { BOOKING_STATUS, markMissedBookings, updateNearestBookingStatus } from "../utils/bookingLifecycle";
 
 const APP_TZ = env.appTz;
@@ -28,6 +29,12 @@ const emitQueueEnded = (
   io.to(receptionRoom).emit("queueUpdated", payload);
   if (medicalCenterId) {
     io.to(`center_${medicalCenterId}`).emit("queue:update", payload);
+    emitClinicPublicQueueUpdate({
+      clinicId: medicalCenterId,
+      doctorId,
+      queueId,
+      type: payload.type,
+    });
   }
   for (const row of patientIds) {
     if (!row?.patient_id) continue;

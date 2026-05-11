@@ -13,6 +13,7 @@ import {
 } from "../utils/security";
 import { getDoctorCenterMembershipsForAuth } from "./doctorAssociation.service";
 import { getReceptionistPermissionsForAuth } from "./receptionist.service";
+import { toReceptionistPermissionContract } from "./receptionistPermissions.service";
 import { env } from "../config/env";
 import { sendPasswordResetEmail } from "./email.service";
 
@@ -25,12 +26,26 @@ type LoginUserRow = {
   password: string | null;
   password_hash: string | null;
   is_password_set: boolean;
+  doctor_id: number | null;
+  doctor_phone: string | null;
+  doctor_specialization: string | null;
+  doctor_experience_years: number | null;
+  doctor_verification_status: string | null;
+  doctor_verification_notes: string | null;
   admin_medical_center_id: string | null;
+  admin_medical_center_verification_status: string | null;
+  admin_medical_center_verification_notes: string | null;
   center_user_medical_center_id: string | null;
   center_user_status: string | null;
   active_doctor_center_medical_center_id: string | null;
   doctor_medical_center_id: string | null;
   receptionist_medical_center_id: string | null;
+  receptionist_medical_center_verification_status: string | null;
+  receptionist_medical_center_verification_notes: string | null;
+  pharmacy_id: number | null;
+  pharmacy_name: string | null;
+  pharmacy_verification_status: string | null;
+  pharmacy_verification_notes: string | null;
 };
 type MedicalCenterMembershipRow = {
   medical_center_id: string;
@@ -216,63 +231,69 @@ const resolveMedicalCenterId = (row: Record<string, unknown>) => {
   return null;
 };
 
-export const loginUserWithPassword = async (input: {
-  email: string;
-  password: string;
-  expoPushToken?: string;
-}) => {
-  const email = normalizeEmail(input.email);
-  const password = String(input.password || "");
+const normalizeVerificationStatus = (value: unknown) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized.length > 0 ? normalized : "pending";
+};
 
-  if (!email || !password) {
-    const error = new Error("Email and password are required");
-    (error as any).statusCode = 400;
-    throw error;
-  }
+const selectAuthContextSql = `
+  SELECT
+    u.id,
+    u.name,
+    u.email,
+    u.role,
+    u.password,
+    u.password_hash,
+    u.is_password_set,
+    d.id AS doctor_id,
+    d.phone AS doctor_phone,
+    d.specialization AS doctor_specialization,
+    d.experience_years AS doctor_experience_years,
+    LOWER(COALESCE(d.verification_status, 'pending')) AS doctor_verification_status,
+    d.verification_notes AS doctor_verification_notes,
+    mca.medical_center_id AS admin_medical_center_id,
+    LOWER(COALESCE(admin_center.verification_status, 'pending')) AS admin_medical_center_verification_status,
+    admin_center.verification_notes AS admin_medical_center_verification_notes,
+    mcu.medical_center_id AS center_user_medical_center_id,
+    mcu.status AS center_user_status,
+    mcd_active.medical_center_id AS active_doctor_center_medical_center_id,
+    d.medical_center_id AS doctor_medical_center_id,
+    r.medical_center_id AS receptionist_medical_center_id,
+    LOWER(COALESCE(reception_center.verification_status, 'pending')) AS receptionist_medical_center_verification_status,
+    reception_center.verification_notes AS receptionist_medical_center_verification_notes,
+    linked_pharmacy.id AS pharmacy_id,
+    linked_pharmacy.name AS pharmacy_name,
+    LOWER(COALESCE(linked_pharmacy.verification_status, 'pending')) AS pharmacy_verification_status,
+    linked_pharmacy.verification_notes AS pharmacy_verification_notes
+  FROM users u
+  LEFT JOIN doctors d ON d.user_id = u.id
+  LEFT JOIN medical_center_admins mca ON mca.user_id = u.id
+  LEFT JOIN medical_centers admin_center ON admin_center.id = mca.medical_center_id
+  LEFT JOIN medical_center_users mcu
+    ON mcu.user_id = u.id
+   AND mcu.status = 'ACTIVE'
+  LEFT JOIN LATERAL (
+    SELECT medical_center_id
+    FROM medical_center_doctors
+    WHERE doctor_id = u.id
+      AND status = 'ACTIVE'
+    ORDER BY created_at ASC
+    LIMIT 1
+  ) mcd_active ON TRUE
+  LEFT JOIN receptionists r ON r.user_id = u.id
+  LEFT JOIN medical_centers reception_center ON reception_center.id = r.medical_center_id
+  LEFT JOIN LATERAL (
+    SELECT p.id, p.name, p.verification_status, p.verification_notes
+    FROM pharmacist_pharmacies pp
+    JOIN pharmacies p ON p.id = pp.pharmacy_id
+    WHERE pp.user_id = u.id
+    ORDER BY pp.created_at ASC
+    LIMIT 1
+  ) linked_pharmacy ON TRUE
+`;
 
-  const result = await pool.query<LoginUserRow>(
-    `
-      SELECT
-        u.id,
-        u.name,
-        u.email,
-        u.role,
-        u.password,
-        u.password_hash,
-        u.is_password_set,
-        mca.medical_center_id AS admin_medical_center_id,
-        mcu.medical_center_id AS center_user_medical_center_id,
-        mcu.status AS center_user_status,
-        mcd_active.medical_center_id AS active_doctor_center_medical_center_id,
-        d.medical_center_id AS doctor_medical_center_id,
-        r.medical_center_id AS receptionist_medical_center_id
-      FROM users u
-      LEFT JOIN medical_center_admins mca ON mca.user_id = u.id
-      LEFT JOIN medical_center_users mcu
-        ON mcu.user_id = u.id
-       AND mcu.status = 'ACTIVE'
-      LEFT JOIN LATERAL (
-        SELECT medical_center_id
-        FROM medical_center_doctors
-        WHERE doctor_id = u.id
-          AND status = 'ACTIVE'
-        ORDER BY created_at ASC
-        LIMIT 1
-      ) mcd_active ON TRUE
-      LEFT JOIN doctors d ON d.user_id = u.id
-      LEFT JOIN receptionists r ON r.user_id = u.id
-      WHERE LOWER(u.email) = $1
-      LIMIT 1
-    `,
-    [email]
-  );
-
-  if (result.rows.length === 0) {
-    throw createStatusError("Invalid email or password", 401);
-  }
-
-  const user = result.rows[0];
-  const storedPasswordHash = user.password_hash || user.password;
+const getAuthUserPayload = async (user: LoginUserRow) => {
+  const normalizedRole = String(user.role || "").toLowerCase();
   const medicalCenterMemberships = await pool.query<MedicalCenterMembershipRow>(
     `
       SELECT medical_center_id, role, status
@@ -292,7 +313,8 @@ export const loginUserWithPassword = async (input: {
       id: membership.medical_center_id,
       role: String(membership.role || "").toLowerCase(),
     }));
-  if (String(user.role || "").toLowerCase() === "doctor") {
+
+  if (normalizedRole === "doctor") {
     const doctorCenterIds = await getDoctorCenterMembershipsForAuth(user.id);
     for (const medicalCenterId of doctorCenterIds) {
       if (!centers.some((center) => center.id === medicalCenterId && center.role === "doctor")) {
@@ -300,13 +322,132 @@ export const loginUserWithPassword = async (input: {
       }
     }
   }
-  const hasCenterMembership = medicalCenterMemberships.rows.length > 0;
+
+  const medicalCenterId = resolveMedicalCenterId(user);
+  const receptionistPermissions =
+    normalizedRole === "receptionist"
+      ? await getReceptionistPermissionsForAuth(user.id, medicalCenterId ?? centers[0]?.id ?? null)
+      : undefined;
+  const receptionistPermissionContract =
+    normalizedRole === "receptionist"
+      ? toReceptionistPermissionContract(receptionistPermissions)
+      : undefined;
+  const doctorVerificationStatus =
+    normalizedRole === "doctor" ? normalizeVerificationStatus(user.doctor_verification_status) : null;
+  const medicalCenterVerificationStatus =
+    normalizedRole === "medical_center_admin"
+      ? normalizeVerificationStatus(user.admin_medical_center_verification_status)
+      : normalizedRole === "receptionist"
+        ? normalizeVerificationStatus(user.receptionist_medical_center_verification_status)
+        : null;
+  const pharmacyVerificationStatus =
+    normalizedRole === "pharmacist"
+      ? normalizeVerificationStatus(user.pharmacy_verification_status)
+      : null;
+  const verificationStatus =
+    normalizedRole === "doctor"
+      ? doctorVerificationStatus
+      : normalizedRole === "medical_center_admin"
+        ? medicalCenterVerificationStatus
+        : normalizedRole === "pharmacist"
+          ? pharmacyVerificationStatus
+          : normalizedRole === "receptionist"
+            ? medicalCenterVerificationStatus
+            : null;
+  const verificationNotes =
+    normalizedRole === "doctor"
+      ? user.doctor_verification_notes
+      : normalizedRole === "medical_center_admin"
+        ? user.admin_medical_center_verification_notes
+        : normalizedRole === "pharmacist"
+          ? user.pharmacy_verification_notes
+          : normalizedRole === "receptionist"
+            ? user.receptionist_medical_center_verification_notes
+            : null;
+
+  return {
+    medicalCenterMemberships,
+    centers,
+    medicalCenterId,
+    receptionistPermissions: receptionistPermissionContract,
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      medical_center_id: medicalCenterId ?? centers[0]?.id ?? null,
+      centers,
+      is_password_set: user.is_password_set,
+      receptionist_permissions: receptionistPermissionContract,
+      doctor_id: user.doctor_id,
+      pharmacy_id: user.pharmacy_id,
+      pharmacy_name: user.pharmacy_name,
+      phone: user.doctor_phone,
+      specialization: user.doctor_specialization,
+      experience_years: user.doctor_experience_years,
+      verification_status: verificationStatus,
+      verificationStatus,
+      approvalStatus: verificationStatus,
+      status: verificationStatus,
+      verification_notes: verificationNotes,
+    },
+  };
+};
+
+export const getAuthContextUserById = async (userId: number) => {
+  const result = await pool.query<LoginUserRow>(
+    `
+      ${selectAuthContextSql}
+      WHERE u.id = $1
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  if (result.rows.length === 0) {
+    throw createStatusError("User not found", 404);
+  }
+
+  return getAuthUserPayload(result.rows[0]);
+};
+
+export const loginUserWithPassword = async (input: {
+  email: string;
+  password: string;
+  expoPushToken?: string;
+}) => {
+  const email = normalizeEmail(input.email);
+  const password = String(input.password || "");
+
+  if (!email || !password) {
+    const error = new Error("Email and password are required");
+    (error as any).statusCode = 400;
+    throw error;
+  }
+
+  const result = await pool.query<LoginUserRow>(
+    `
+      ${selectAuthContextSql}
+      WHERE LOWER(u.email) = $1
+      LIMIT 1
+    `,
+    [email]
+  );
+
+  if (result.rows.length === 0) {
+    throw createStatusError("Invalid email or password", 401);
+  }
+
+  const user = result.rows[0];
+  const storedPasswordHash = user.password_hash || user.password;
+  const authUserPayload = await getAuthUserPayload(user);
+  const hasCenterMembership = authUserPayload.medicalCenterMemberships.rows.length > 0;
 
   if (!user.is_password_set || !storedPasswordHash) {
     throw createStatusError("Password setup required before login", 403);
   }
 
-  if (hasCenterMembership && centers.length === 0) {
+  if (hasCenterMembership && authUserPayload.centers.length === 0) {
     throw createStatusError("User account is inactive", 403);
   }
 
@@ -331,33 +472,18 @@ export const loginUserWithPassword = async (input: {
     }
   }
 
-  const medicalCenterId = resolveMedicalCenterId(user);
-  const receptionistPermissions =
-    String(user.role || "").toLowerCase() === "receptionist"
-      ? await getReceptionistPermissionsForAuth(user.id, medicalCenterId ?? centers[0]?.id ?? null)
-      : undefined;
-
   const token = signAuthToken({
     id: user.id,
     email: user.email,
     role: user.role,
-    medicalCenterId: medicalCenterId ?? centers[0]?.id ?? null,
-    centers,
-    receptionistPermissions,
+    medicalCenterId: authUserPayload.medicalCenterId ?? authUserPayload.centers[0]?.id ?? null,
+    centers: authUserPayload.centers,
+    receptionistPermissions: authUserPayload.receptionistPermissions,
   });
 
   return {
     token,
-    user: {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      medical_center_id: medicalCenterId ?? centers[0]?.id ?? null,
-      centers,
-      is_password_set: user.is_password_set,
-      receptionist_permissions: receptionistPermissions,
-    },
+    user: authUserPayload.user,
   };
 };
 

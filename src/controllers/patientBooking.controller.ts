@@ -14,11 +14,14 @@ import {
 
 type BookingMutationBody = {
   doctor_id?: number | string;
+  clinic_id?: string;
+  medical_center_id?: string;
+  session_id?: number | string;
   date?: string;
   time?: string;
 };
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; debug?: unknown };
 
 const requirePatientUser = (req: AuthenticatedRequest) => {
   const role = req.user?.role;
@@ -43,6 +46,7 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
 
   return res.status(statusCode).json({
     message: appError?.message || fallbackMessage,
+    ...(process.env.NODE_ENV !== "production" && appError?.debug ? { debug: appError.debug } : {}),
   });
 };
 
@@ -108,12 +112,18 @@ export const getDoctorBookings = async (req: AuthenticatedRequest, res: Response
 
     const { doctorId } = req.params;
     const date = typeof req.query.date === "string" ? req.query.date : undefined;
+    const clinicId =
+      typeof req.query.clinicId === "string"
+        ? req.query.clinicId
+        : typeof req.query.medicalCenterId === "string"
+          ? req.query.medicalCenterId
+          : undefined;
 
-    if (!date) {
-      return res.status(400).json({ message: "date is required (YYYY-MM-DD)" });
+    if (!date || !clinicId) {
+      return res.status(400).json({ message: "date and clinicId are required" });
     }
 
-    const rows = await listDoctorBookedSlots(doctorId, date);
+    const rows = await listDoctorBookedSlots(doctorId, clinicId, date);
     return res.json(rows);
   } catch (error) {
     console.error("Error fetching bookings:", error);
@@ -127,10 +137,11 @@ export const createBooking = async (
 ) => {
   try {
     const patientId = requirePatientUser(req);
-    const { doctor_id, date, time } = req.body || {};
+    const { doctor_id, clinic_id, medical_center_id, session_id, date, time } = req.body || {};
+    const clinicId = String(clinic_id || medical_center_id || "").trim();
 
-    if (!doctor_id || !date || !time) {
-      return res.status(400).json({ message: "doctor_id, date, time are required" });
+    if (!doctor_id || !clinicId || !date || !time) {
+      return res.status(400).json({ message: "doctor_id, clinic_id, date, time are required" });
     }
 
     const doctorId = parsePositiveId(doctor_id);
@@ -143,7 +154,14 @@ export const createBooking = async (
       return res.status(400).json({ message: payloadValidation.message });
     }
 
-    const booking = await createPatientBooking(patientId, doctorId, String(date), String(time));
+    const booking = await createPatientBooking(
+      patientId,
+      doctorId,
+      clinicId,
+      String(date),
+      String(time),
+      parsePositiveId(session_id)
+    );
 
     return res.json({
       message: "Booked successfully",

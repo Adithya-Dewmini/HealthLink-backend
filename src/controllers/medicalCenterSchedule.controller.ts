@@ -1,11 +1,15 @@
 import type { RequestHandler, Response } from "express";
 import type { AuthenticatedRequest } from "../types/auth";
-import { io } from "../server";
 import {
   createCenterSchedule,
+  getCenterDoctorAvailabilityState,
   disableCenterSchedule,
+  getCenterDoctorAvailabilityForDate,
   listCenterSchedules,
+  listCenterDoctorRoutines,
+  listCenterSchedulesForDoctor,
   previewCenterSchedule,
+  saveCenterDoctorRoutine,
   updateCenterSchedule,
 } from "../services/schedule.service";
 
@@ -19,25 +23,31 @@ type ScheduleBody = {
   is_active?: boolean;
 };
 
+type RoutineBody = {
+  weeks?: number | string;
+  slotDuration?: number | string;
+  maxPatients?: number | string;
+  routine?: Array<{
+    dayOfWeek?: number | string;
+    shifts?: Array<{ start?: string; end?: string }>;
+  }>;
+};
+
 type CenterRequest<TBody = Record<string, unknown>> = AuthenticatedRequest<TBody> & {
   medicalCenterId: string;
   params: Record<string, string>;
 };
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; details?: string[] };
 
 const handleControllerError = (res: Response, error: unknown, fallbackMessage: string) => {
   const appError = error as HttpError;
   return res.status(Number(appError?.statusCode) || 500).json({
     message: appError?.message || fallbackMessage,
+    ...(Array.isArray(appError?.details) && appError.details.length > 0
+      ? { details: appError.details }
+      : {}),
   });
-};
-
-const emitScheduleUpdate = (doctorId: number | string, medicalCenterId: string, payload?: Record<string, unknown>) => {
-  const data = { doctorId, medicalCenterId, ...(payload || {}) };
-  io.to(`doctor_${doctorId}`).emit("schedule:update", data);
-  io.to(`doctor-${doctorId}`).emit("schedule:update", data);
-  io.to(`center_${medicalCenterId}`).emit("schedule:update", data);
 };
 
 export const listMedicalCenterSchedulesController: RequestHandler = async (req, res: Response) => {
@@ -93,11 +103,6 @@ export const createMedicalCenterScheduleController: RequestHandler = async (
       createdByUserId: Number(typedReq.user?.id),
     });
 
-    emitScheduleUpdate(result.schedule.doctor_id, typedReq.medicalCenterId, {
-      type: "session:created",
-      scheduleId: result.schedule.id,
-    });
-
     return res.status(201).json(result);
   } catch (error) {
     return handleControllerError(res, error, "Failed to create schedule");
@@ -129,11 +134,6 @@ export const updateMedicalCenterScheduleController: RequestHandler = async (
       updatedByUserId: Number(typedReq.user?.id),
     });
 
-    emitScheduleUpdate(result.schedule.doctor_id, typedReq.medicalCenterId, {
-      type: "session:updated",
-      scheduleId: result.schedule.id,
-    });
-
     return res.status(200).json(result);
   } catch (error) {
     return handleControllerError(res, error, "Failed to update schedule");
@@ -153,13 +153,153 @@ export const disableMedicalCenterScheduleController: RequestHandler = async (
       disabledByUserId: Number(typedReq.user?.id),
     });
 
-    emitScheduleUpdate(result.schedule.doctor_id, typedReq.medicalCenterId, {
-      type: "session:disabled",
-      scheduleId: result.schedule.id,
+    return res.status(200).json(result);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to disable schedule");
+  }
+};
+
+export const listMedicalCenterDoctorSchedulesController: RequestHandler = async (req, res: Response) => {
+  const typedReq = req as CenterRequest;
+
+  try {
+    const activeOnly = String(req.query.active_only || "").trim().toLowerCase() === "true";
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const schedules = await listCenterSchedulesForDoctor(typedReq.medicalCenterId, doctorUserId, {
+      activeOnly,
+    });
+    return res.status(200).json(schedules);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to load doctor schedules");
+  }
+};
+
+export const listMedicalCenterDoctorRoutinesController: RequestHandler = async (req, res: Response) => {
+  const typedReq = req as CenterRequest;
+
+  try {
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const routines = await listCenterDoctorRoutines(typedReq.medicalCenterId, doctorUserId);
+    return res.status(200).json(routines);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to load doctor routines");
+  }
+};
+
+export const getMedicalCenterDoctorAvailabilityController: RequestHandler = async (
+  req,
+  res: Response
+) => {
+  const typedReq = req as CenterRequest;
+
+  try {
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const date = String(req.query.date || "");
+    const availability = await getCenterDoctorAvailabilityForDate(
+      typedReq.medicalCenterId,
+      doctorUserId,
+      date
+    );
+    return res.status(200).json(availability);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to load doctor availability");
+  }
+};
+
+export const getMedicalCenterDoctorAvailabilityStateController: RequestHandler = async (
+  req,
+  res: Response
+) => {
+  const typedReq = req as CenterRequest;
+
+  try {
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const availability = await getCenterDoctorAvailabilityState(
+      typedReq.medicalCenterId,
+      doctorUserId
+    );
+    return res.status(200).json(availability);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to load weekly doctor availability");
+  }
+};
+
+export const saveMedicalCenterDoctorRoutineController: RequestHandler = async (
+  req,
+  res: Response
+) => {
+  const typedReq = req as CenterRequest<RoutineBody>;
+
+  try {
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const result = await saveCenterDoctorRoutine({
+      medicalCenterId: typedReq.medicalCenterId,
+      doctorUserId,
+      weeks:
+        typedReq.body?.weeks === undefined ? undefined : Number(typedReq.body.weeks),
+      slotDuration: Number(typedReq.body?.slotDuration),
+      maxPatients: Number(typedReq.body?.maxPatients),
+      routine: Array.isArray(typedReq.body?.routine)
+        ? typedReq.body.routine.map((day) => ({
+            dayOfWeek: Number(day?.dayOfWeek),
+            shifts: Array.isArray(day?.shifts)
+              ? day.shifts.map((shift) => ({
+                  start: String(shift?.start || ""),
+                  end: String(shift?.end || ""),
+                }))
+              : [],
+          }))
+        : [],
     });
 
     return res.status(200).json(result);
   } catch (error) {
-    return handleControllerError(res, error, "Failed to disable schedule");
+    return handleControllerError(res, error, "Failed to save routine schedule");
+  }
+};
+
+export const createMedicalCenterDoctorManualScheduleController: RequestHandler = async (
+  req,
+  res: Response
+) => {
+  const typedReq = req as CenterRequest<ScheduleBody>;
+
+  try {
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const result = await createCenterSchedule({
+      medicalCenterId: typedReq.medicalCenterId,
+      doctorUserId,
+      date: String(typedReq.body?.date || ""),
+      startTime: String(typedReq.body?.start_time || ""),
+      endTime: String(typedReq.body?.end_time || ""),
+      slotDuration: Number(typedReq.body?.slot_duration),
+      maxPatients: Number(typedReq.body?.max_patients),
+      createdByUserId: Number(typedReq.user?.id),
+    });
+
+    return res.status(201).json(result);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to create manual schedule");
+  }
+};
+
+export const disableMedicalCenterDoctorScheduleController: RequestHandler = async (
+  req,
+  res: Response
+) => {
+  const typedReq = req as CenterRequest;
+
+  try {
+    const doctorUserId = Number(typedReq.params.doctorId || "");
+    const result = await disableCenterSchedule({
+      medicalCenterId: typedReq.medicalCenterId,
+      scheduleId: String(typedReq.params.scheduleId || ""),
+      doctorUserId,
+      disabledByUserId: Number(typedReq.user?.id),
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to disable doctor schedule");
   }
 };

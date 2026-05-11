@@ -1,12 +1,24 @@
 import http from "http";
 import { Server } from "socket.io";
 import express from "express";  
-import cors from "cors";
+import axios from "axios";
 import path from "path";
 import pool, { initDb } from "./config/db"; // ✅ initialize DB before starting server
 import { env } from "./config/env";
 import { startQueueAutoEnd } from "./jobs/queueAutoEnd";
 import { startRoutineSessionGenerationJob } from "./jobs/sessionGeneration";
+import { errorHandler } from "./middleware/errorHandler";
+import { requestLogger } from "./middleware/requestLogger";
+import { sanitizeInput } from "./middleware/sanitizeInput";
+import { apiRateLimiter, corsMiddleware, securityHeaders } from "./middleware/security";
+import { clinicPublicRoom } from "./services/clinicRealtime.service";
+import {
+  attachRealtimeServer,
+  orderRoom,
+  patientRoom,
+  pharmacyRoom,
+  userRoom,
+} from "./services/realtime.service";
 import { extractBearerToken, verifyAuthToken, type JwtPayload } from "./utils/security";
 console.log("GEMINI KEY LOADED:", Boolean(env.geminiApiKey));
 
@@ -14,15 +26,39 @@ process.on("unhandledRejection", (reason) => {
   console.error("Unhandled promise rejection:", reason);
 });
 
-const app = express();
+export const app = express();
 
-app.use(
-  cors({
-    origin: "*",
-  })
-);
+app.use(securityHeaders);
+app.use(corsMiddleware);
+app.use(requestLogger);
+app.use(apiRateLimiter);
 app.use(express.json());
+app.use(sanitizeInput);
 app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
+
+app.get("/api/health", async (_req, res) => {
+  const timestamp = new Date().toISOString();
+  const databaseConnected = await pool.query("SELECT 1").then(() => true).catch(() => false);
+  const forecastAvailable = env.forecastServiceUrl
+    ? await axios
+        .get(`${env.forecastServiceUrl.replace(/\/$/, "")}/health`, { timeout: 5000 })
+        .then(() => true)
+        .catch(() => false)
+    : false;
+
+  res.status(databaseConnected ? 200 : 503).json({
+    status: databaseConnected ? "OK" : "DEGRADED",
+    timestamp,
+    database: databaseConnected ? "connected" : "unavailable",
+    forecastService: env.forecastServiceUrl
+      ? forecastAvailable
+        ? "available"
+        : "offline"
+      : "not_configured",
+    socket: "enabled",
+    version: process.env.npm_package_version || "1.0.0",
+  });
+});
 
 import patientRoutes from "./routes/patientRoutes";
 app.use("/api/patients", patientRoutes);
@@ -35,6 +71,20 @@ app.use("/api/doctor", doctorRoutes);
 
 import pharmacyRoutes from "./routes/pharmacyRoutes";
 app.use("/api/pharmacy", pharmacyRoutes);
+
+import marketplaceRoutes from "./modules/marketplace/routes";
+app.use("/api/marketplace", marketplaceRoutes);
+
+import cartRoutes from "./modules/cart/routes";
+app.use("/api/cart", cartRoutes);
+
+import orderRoutes from "./modules/orders/routes";
+app.use("/api/orders", orderRoutes);
+
+import notificationRoutes from "./modules/notifications/routes";
+app.use("/api/notifications", notificationRoutes);
+import activityRoutes from "./modules/activity/routes";
+app.use("/api/activity", activityRoutes);
 
 import authRoutes from "./routes/authRoutes";
 app.use("/auth", authRoutes);
@@ -51,6 +101,7 @@ app.use("/api/upload", uploadRoutes);
 
 import favoritesRoutes from "./routes/favorites.routes";
 app.use("/api/favorites", favoritesRoutes);
+app.use("/api/patient/favorites", favoritesRoutes);
 
 import medicalCenterRoutes from "./routes/medicalCenter.routes";
 app.use("/api/center", medicalCenterRoutes);
@@ -85,9 +136,6 @@ app.use("/api/clinic-specialties", specialtyRoutes);
 import doctorClinicAdminRoutes from "./routes/doctorClinicAdmin.routes";
 app.use("/api/doctor-clinics", doctorClinicAdminRoutes);
 
-import routineRoutes from "./routes/routine.routes";
-app.use("/api/routines", routineRoutes);
-
 import meRoutes from "./routes/me.routes";
 app.use("/api/me", meRoutes);
 
@@ -112,8 +160,8 @@ app.use("/api/admin", adminPharmacyRoutes);
 import adminUserRoutes from "./routes/admin.user.routes";
 app.use("/api/admin", adminUserRoutes);
 
-import adminUserManagementRoutes from "./routes/admin.user.management.routes";
-app.use("/api/admin", adminUserManagementRoutes);
+// import adminUserManagementRoutes from "./routes/admin.user.management.routes";
+// app.use("/api/admin", adminUserManagementRoutes);
 
 import adminAuditRoutes from "./routes/admin.audit.routes";
 app.use("/api/admin", adminAuditRoutes);
@@ -121,9 +169,18 @@ app.use("/api/admin", adminAuditRoutes);
 import adminMonitorRoutes from "./routes/admin.monitor.routes";
 app.use("/api/admin", adminMonitorRoutes);
 
+import {
+  adminDashboardBannerRoutes,
+  patientDashboardBannerRoutes,
+} from "./routes/dashboardBanner.routes";
+app.use("/api/admin", adminDashboardBannerRoutes);
+app.use("/api/patient", patientDashboardBannerRoutes);
+
 app.get("/", (req, res) => {
   res.send("HealthLink API running 🚀");
 });
+
+app.use(errorHandler);
 
 
 const PORT = env.port;
@@ -133,9 +190,10 @@ const server = http.createServer(app);
 // Attach Socket.io
 export const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: env.allowedOrigins.length ? env.allowedOrigins : "*",
   },
 });
+attachRealtimeServer(io);
 
 io.use((socket, next) => {
   try {
@@ -151,7 +209,11 @@ io.use((socket, next) => {
       return next(new Error("Unauthorized"));
     }
 
-    socket.data.user = verifyAuthToken(token);
+    const user = verifyAuthToken(token);
+    if (!user?.id || !user?.role) {
+      return next(new Error("Unauthorized"));
+    }
+    socket.data.user = user;
     return next();
   } catch {
     return next(new Error("Unauthorized"));
@@ -235,12 +297,41 @@ const canJoinSessionRoom = async (user: JwtPayload, rawSessionId: unknown) => {
   }
 };
 
+const getPharmacyIdForUser = async (userId: number) => {
+  try {
+    const result = await pool.query<{ pharmacy_id: number }>(
+      `
+        SELECT pharmacy_id
+        FROM pharmacist_pharmacies
+        WHERE user_id = $1
+        ORDER BY pharmacy_id ASC
+        LIMIT 1
+      `,
+      [userId]
+    );
+    return result.rows[0]?.pharmacy_id ?? null;
+  } catch (error) {
+    console.error("getPharmacyIdForUser error:", error);
+    return null;
+  }
+};
+
 io.on("connection", (socket) => {
   console.log("⚡ Client connected:", socket.id);
   const user = socket.data.user as JwtPayload | undefined;
 
   if (user?.id) {
     socket.join(`user_${user.id}`);
+    socket.join(userRoom(user.id));
+    socket.join(patientRoom(user.id));
+    if (String(user.role || "").toLowerCase() === "pharmacist") {
+      void (async () => {
+        const ownedPharmacyId = await getPharmacyIdForUser(Number(user.id));
+        if (ownedPharmacyId) {
+          socket.join(pharmacyRoom(ownedPharmacyId));
+        }
+      })();
+    }
   }
 
   socket.on("joinDoctorRoom", (payload: { doctorId?: number | string } | number | string) => {
@@ -266,6 +357,34 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`patient_${patientId}`);
+    socket.join(patientRoom(patientId));
+  });
+
+  socket.on("joinOrderRoom", (payload: { orderId?: number | string } | number | string) => {
+    if (!user) return;
+    const orderId = typeof payload === "object" ? payload?.orderId : payload;
+    if (orderId === undefined || orderId === null || orderId === "") return;
+    socket.join(orderRoom(orderId));
+  });
+
+  socket.on("joinPharmacyRoom", (payload: { pharmacyId?: number | string } | number | string) => {
+    if (!user || String(user.role || "").toLowerCase() !== "pharmacist") {
+      return;
+    }
+
+    void (async () => {
+      const requestedPharmacyId =
+        typeof payload === "object" ? payload?.pharmacyId : payload;
+      if (requestedPharmacyId === undefined || requestedPharmacyId === null || requestedPharmacyId === "") {
+        return;
+      }
+
+      const ownedPharmacyId = await getPharmacyIdForUser(Number(user.id));
+      if (!ownedPharmacyId || Number(requestedPharmacyId) !== Number(ownedPharmacyId)) {
+        return;
+      }
+      socket.join(pharmacyRoom(ownedPharmacyId));
+    })();
   });
 
   socket.on("joinSession", (payload: { sessionId?: number | string } | number | string) => {
@@ -314,6 +433,34 @@ io.on("connection", (socket) => {
       }
 
       socket.join(`center_${centerId}`);
+    }
+  );
+
+  socket.on(
+    "joinClinicScheduleRoom",
+    (payload: { clinicId?: string } | string | null | undefined) => {
+      if (!user) {
+        return;
+      }
+
+      const clinicId = typeof payload === "object" ? payload?.clinicId : payload;
+      if (!clinicId || String(clinicId).trim() === "") {
+        return;
+      }
+
+      socket.join(clinicPublicRoom(String(clinicId).trim()));
+    }
+  );
+
+  socket.on(
+    "leaveClinicScheduleRoom",
+    (payload: { clinicId?: string } | string | null | undefined) => {
+      const clinicId = typeof payload === "object" ? payload?.clinicId : payload;
+      if (!clinicId || String(clinicId).trim() === "") {
+        return;
+      }
+
+      socket.leave(clinicPublicRoom(String(clinicId).trim()));
     }
   );
 

@@ -14,6 +14,13 @@ type DoctorInviteEmailInput = {
   webLink: string;
 };
 
+type PasswordResetEmailInput = {
+  to: string;
+  name?: string;
+  resetLink?: string;
+  webLink?: string;
+};
+
 let cachedTransporter: any = null;
 let transporterVerified = false;
 
@@ -182,6 +189,63 @@ export const sendDoctorInviteEmail = async ({
           </p>
           <p style="margin:8px 0 0; color:#2563EB; font-size:13px; word-break:break-all;">
             ${safeWebLink}
+          </p>
+        </div>
+      </div>
+    `,
+  });
+};
+
+export const sendPasswordResetEmail = async ({
+  to,
+  name,
+  resetLink,
+  webLink,
+}: PasswordResetEmailInput) => {
+  const transporter = getTransporter();
+  const from = env.smtpFrom || env.smtpUser;
+
+  if (!from) {
+    throw new Error("SMTP_FROM or SMTP_USER must be configured");
+  }
+
+  assertNotPlaceholderValue("SMTP_FROM", from);
+
+  if (!transporterVerified) {
+    await transporter.verify();
+    transporterVerified = true;
+  }
+
+  const safeName = escapeHtml(String(name || "there"));
+  const resolvedResetLink = String(resetLink || webLink || "").trim();
+  const safeResetLink = escapeHtml(resolvedResetLink);
+
+  await transporter.sendMail({
+    from,
+    to,
+    subject: "Reset your HealthLink password",
+    text: [
+      `Hi ${name || "there"},`,
+      "",
+      "Reset your password using this link:",
+      resolvedResetLink,
+    ].join("\n"),
+    html: `
+      <div style="font-family: Arial, sans-serif; background:#F4F7FB; padding:32px;">
+        <div style="max-width:560px; margin:0 auto; background:#FFFFFF; border-radius:20px; padding:32px; border:1px solid #E5E7EB;">
+          <h1 style="margin:0 0 16px; color:#1F2937; font-size:28px;">Reset your password</h1>
+          <p style="margin:0 0 24px; color:#374151; font-size:16px;">Hi ${safeName},</p>
+          <a
+            href="${safeResetLink}"
+            style="display:inline-block; background:#2563EB; color:#FFFFFF; text-decoration:none; font-weight:700; padding:14px 22px; border-radius:14px;"
+          >
+            Reset Password
+          </a>
+          <p style="margin:24px 0 0; color:#6B7280; font-size:13px; line-height:20px;">
+            If the button does not open, copy and paste this link into your browser:
+          </p>
+          <p style="margin:8px 0 0; color:#2563EB; font-size:13px; word-break:break-all;">
+            ${safeResetLink}
           </p>
         </div>
       </div>

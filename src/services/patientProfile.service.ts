@@ -3,6 +3,7 @@ import pool from "../config/db";
 type PatientProfileUpdateInput = {
   name?: string;
   email?: string;
+  profile_image?: string;
   phone?: string;
   dob?: string;
   gender?: string;
@@ -30,6 +31,7 @@ const getPatientProfileQuery = `
     u.name,
     u.email,
     u.role,
+    u.profile_image,
     p.phone,
     p.dob,
     p.gender,
@@ -86,13 +88,14 @@ export const updatePatientProfile = async (
       )
     `);
 
-    if (input.name || input.email) {
+    if (input.name || input.email || input.profile_image) {
       await client.query(
         `UPDATE users SET
           name = COALESCE($1, name),
-          email = COALESCE($2, email)
-        WHERE id = $3`,
-        [input.name, input.email, userId]
+          email = COALESCE($2, email),
+          profile_image = COALESCE($3, profile_image)
+        WHERE id = $4`,
+        [input.name, input.email, input.profile_image, userId]
       );
     }
 

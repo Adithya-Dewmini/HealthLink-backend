@@ -57,12 +57,14 @@ export const getPrescriptionDetails = async (prescriptionId: string, user?: { id
       c.created_at AS consultation_created_at,
       pu.name AS patient_name,
       du.name AS doctor_name,
+      mc.name AS medical_center_name,
       COALESCE(d.specialization, 'General Physician') AS specialization
     FROM prescriptions p
     JOIN consultations c ON c.id = p.consultation_id
     LEFT JOIN users pu ON pu.id = c.patient_id
     LEFT JOIN users du ON du.id = c.doctor_id
     LEFT JOIN doctors d ON d.user_id = c.doctor_id
+    LEFT JOIN medical_centers mc ON mc.id = COALESCE(p.medical_center_id, c.medical_center_id)
     WHERE p.id = $1
     `,
     [prescriptionId]
@@ -122,12 +124,14 @@ export const getPrescriptionDetails = async (prescriptionId: string, user?: { id
 
   return {
     id: String(row.id),
+    qrToken: row.qr_code ?? null,
     title:
       (typeof row.diagnosis === "string" && row.diagnosis.trim()) ||
       (typeof row.symptoms === "string" && row.symptoms.trim()) ||
       "General Treatment",
     doctorName: row.doctor_name ?? "Doctor",
     specialization: row.specialization ?? "General Physician",
+    medicalCenterName: row.medical_center_name ?? null,
     prescribedAt: row.issued_at ?? row.consultation_created_at ?? row.created_at ?? null,
     status: row.dispensed_at ? "COMPLETED" : "ACTIVE",
     medicines: normalizedMedicines,

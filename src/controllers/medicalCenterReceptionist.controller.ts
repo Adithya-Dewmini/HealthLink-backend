@@ -23,7 +23,13 @@ type UpdateReceptionistStatusBody = {
   status?: string;
 };
 
-type UpdateReceptionistPermissionsBody = Partial<ReceptionistPermissionFlags>;
+type UpdateReceptionistPermissionsBody = Partial<
+  ReceptionistPermissionFlags & {
+    queue_access: boolean;
+    appointments: boolean;
+    check_in: boolean;
+  }
+>;
 
 type ReceptionistParams = {
   id: string;
@@ -157,9 +163,11 @@ export const updateReceptionistPermissionsController: RequestHandler = async (
       medicalCenterId: typedReq.medicalCenterId,
       receptionistId: typedReq.params.id,
       permissions: {
-        can_manage_queue: typedReq.body?.can_manage_queue,
-        can_manage_appointments: typedReq.body?.can_manage_appointments,
-        can_check_in: typedReq.body?.can_check_in,
+        can_manage_queue: typedReq.body?.queue_access ?? typedReq.body?.can_manage_queue,
+        can_manage_appointments:
+          typedReq.body?.appointments ?? typedReq.body?.can_manage_appointments,
+        can_check_in: typedReq.body?.check_in ?? typedReq.body?.can_check_in,
+        schedule_management: typedReq.body?.schedule_management,
       },
     });
 

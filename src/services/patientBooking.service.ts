@@ -8,8 +8,19 @@ import {
 import { syncAndFetchPatientBookings } from "../modules/appointments/service";
 import { validateBookingSlot } from "../modules/appointments/validation";
 import { bookUnifiedSession, resolveSessionIdForBooking } from "./unifiedSession.service";
+import { assertVerifiedClinic, assertVerifiedDoctorProfileOnly } from "./verification.service";
 
 type HttpError = Error & { statusCode?: number };
+
+type ScheduleRow = {
+  id: number;
+  doctor_profile_id: number;
+  medical_center_id: string;
+  date: string;
+  start_time: string;
+  end_time: string;
+  is_active: boolean;
+};
 
 type BookingRecord = {
   id: number;
@@ -36,6 +47,21 @@ const toValidDate = (value: string | Date | null | undefined) => {
 
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const resolveDoctorProfileId = async (doctorIdentifier: number) => {
+  const result = await pool.query<{ id: number }>(
+    `
+    SELECT id
+    FROM doctors
+    WHERE id = $1 OR user_id = $1
+    ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END
+    LIMIT 1
+    `,
+    [doctorIdentifier]
+  );
+
+  return result.rows[0]?.id ?? null;
 };
 
 export const listPatientBookings = async (patientId: number) => {
@@ -200,6 +226,11 @@ export const reschedulePatientBooking = async (
 };
 
 export const listDoctorBookedSlots = async (doctorId: string, clinicId: string, date: string) => {
+  const doctorProfileId = await resolveDoctorProfileId(Number(doctorId));
+  if (!doctorProfileId) {
+    return [];
+  }
+
   const result = await pool.query(
     `
     SELECT time
@@ -207,7 +238,7 @@ export const listDoctorBookedSlots = async (doctorId: string, clinicId: string, 
     WHERE doctor_id = $1 AND medical_center_id = $2 AND date = $3
       AND COALESCE(UPPER(status), '') <> '${BOOKING_STATUS.CANCELLED}'
     `,
-    [doctorId, clinicId, date]
+    [doctorProfileId, clinicId, date]
   );
 
   return result.rows;
@@ -218,17 +249,98 @@ export const createPatientBooking = async (
   doctorId: number,
   clinicId: string,
   date: string,
-  time: string
+  time: string,
+  sessionId?: number | null
 ) => {
-  const validation = await validateBookingSlot({ doctorId, clinicId, date, time });
+  if (process.env.NODE_ENV !== "production") {
+    console.log("PATIENT_BOOKING_REQUEST", {
+      patientId,
+      doctorId,
+      clinicId,
+      sessionId: sessionId ?? null,
+      date,
+      time,
+    });
+  }
+
+  const doctorProfileId = await resolveDoctorProfileId(doctorId);
+  if (!doctorProfileId) {
+    throw createStatusError("Doctor not found", 404);
+  }
+
+  await assertVerifiedDoctorProfileOnly(doctorProfileId);
+  await assertVerifiedClinic(clinicId);
+
+  const validation = await validateBookingSlot({ doctorId: doctorProfileId, clinicId, date, time });
   if (validation.ok === false) {
     throw createStatusError(validation.message, 400);
   }
 
-  const sessionId = await resolveSessionIdForBooking(doctorId, clinicId, date, time);
-  if (!sessionId) {
+  let resolvedSessionId = sessionId ?? null;
+
+  if (resolvedSessionId) {
+    const sessionResult = await pool.query<ScheduleRow>(
+      `
+      SELECT
+        id,
+        doctor_profile_id,
+        medical_center_id,
+        date::text AS date,
+        start_time::text AS start_time,
+        end_time::text AS end_time,
+        is_active
+      FROM medical_center_doctor_schedule
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [resolvedSessionId]
+    );
+
+    const session = sessionResult.rows[0];
+    if (!session) {
+      throw createStatusError("Selected clinic session was not found", 404);
+    }
+
+    if (!session.is_active) {
+      throw createStatusError("Selected clinic session is no longer active", 400);
+    }
+
+    if (session.medical_center_id !== clinicId) {
+      const error = createStatusError("Selected clinic session does not belong to this medical center", 400) as HttpError & {
+        debug?: Record<string, unknown>;
+      };
+      error.debug = {
+        requestedMedicalCenterId: clinicId,
+        requestedDoctorId: doctorId,
+        resolvedDoctorProfileId: doctorProfileId,
+        selectedScheduleId: resolvedSessionId,
+        scheduleMedicalCenterId: session.medical_center_id,
+        scheduleDoctorProfileId: session.doctor_profile_id,
+        scheduleDate: session.date,
+        scheduleStartTime: session.start_time,
+        scheduleEndTime: session.end_time,
+      };
+      throw error;
+    }
+
+    if (session.doctor_profile_id !== doctorProfileId) {
+      throw createStatusError("Selected clinic session does not belong to this doctor", 400);
+    }
+
+    if (session.date !== date) {
+      throw createStatusError("Selected clinic session does not match the chosen date", 400);
+    }
+
+    if (!(String(session.start_time).slice(0, 5) <= time && String(session.end_time).slice(0, 5) > time)) {
+      throw createStatusError("Selected time is outside the chosen clinic session", 400);
+    }
+  } else {
+    resolvedSessionId = await resolveSessionIdForBooking(doctorProfileId, clinicId, date, time);
+  }
+
+  if (!resolvedSessionId) {
     throw createStatusError("No session available for the requested slot", 400);
   }
 
-  return bookUnifiedSession(sessionId, patientId, time);
+  return bookUnifiedSession(resolvedSessionId, patientId, time);
 };

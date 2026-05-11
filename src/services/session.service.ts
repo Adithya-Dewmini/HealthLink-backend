@@ -1,6 +1,10 @@
-import { io } from "../server";
 import pool from "../config/db";
 import { createCenterSchedule } from "./schedule.service";
+import {
+  computeClinicSessionStatus,
+  getMonthDateRange,
+  parseSessionTimeToMinutes,
+} from "./sessionDomain.service";
 
 type AppError = Error & { statusCode?: number };
 
@@ -10,9 +14,11 @@ type SessionRow = {
   date: string;
   start_time: string;
   end_time: string;
+  slot_duration: number;
   max_patients: number;
   is_active: boolean;
   status: string | null;
+  clinic_id: string;
   clinic_name: string;
   patient_count: number;
 };
@@ -27,9 +33,6 @@ export type CreateDoctorSessionInput = {
   createdByUserId: number;
 };
 
-const doctorRoom = (doctorId: number | string) => `doctor_${doctorId}`;
-const legacyDoctorRoom = (doctorId: number | string) => `doctor-${doctorId}`;
-
 const createStatusError = (message: string, statusCode: number) => {
   const error = new Error(message) as AppError;
   error.statusCode = statusCode;
@@ -39,12 +42,11 @@ const createStatusError = (message: string, statusCode: number) => {
 const normalizeTime = (value: unknown) => String(value || "").trim().slice(0, 5);
 
 const parseTimeToMinutes = (value: string) => {
-  const normalized = normalizeTime(value);
-  const match = normalized.match(/^(\d{2}):(\d{2})$/);
-  if (!match) {
+  const parsed = parseSessionTimeToMinutes(value);
+  if (parsed == null) {
     throw createStatusError("Time must be in HH:MM format", 400);
   }
-  return Number(match[1]) * 60 + Number(match[2]);
+  return parsed;
 };
 
 const getDoctorProfileId = async (doctorUserId: number) => {
@@ -83,33 +85,6 @@ const deriveSlotDuration = (startTime: string, endTime: string, maxPatients: num
   return slotDuration;
 };
 
-const computeSessionStatus = (date: string, startTime: string, endTime: string, isActive = true) => {
-  if (!isActive) {
-    return "COMPLETED";
-  }
-
-  const now = new Date();
-  const start = new Date(`${date}T${normalizeTime(startTime)}:00`);
-  const end = new Date(`${date}T${normalizeTime(endTime)}:00`);
-
-  if (now >= end) {
-    return "COMPLETED";
-  }
-
-  if (now >= start && now < end) {
-    return "ACTIVE";
-  }
-
-  return "UPCOMING";
-};
-
-const emitScheduleUpdate = (doctorId: number, centerId: string, payload?: Record<string, unknown>) => {
-  const data = { doctorId, centerId, ...(payload || {}) };
-  io.to(doctorRoom(doctorId)).emit("schedule:update", data);
-  io.to(legacyDoctorRoom(doctorId)).emit("schedule:update", data);
-  io.to(`center_${centerId}`).emit("schedule:update", data);
-};
-
 export const createClinicSession = async (input: CreateDoctorSessionInput) => {
   const slotDuration = deriveSlotDuration(input.startTime, input.endTime, input.maxPatients);
 
@@ -130,19 +105,14 @@ export const createClinicSession = async (input: CreateDoctorSessionInput) => {
       SET status = $1
       WHERE id = $2
     `,
-    [computeSessionStatus(input.date, input.startTime, input.endTime, true), result.schedule.id]
+    [computeClinicSessionStatus(input.date, input.startTime, input.endTime, true), result.schedule.id]
   );
-
-  emitScheduleUpdate(input.doctorId, input.centerId, {
-    type: "session:created",
-    scheduleId: result.schedule.id,
-  });
 
   return {
     message: result.message,
     session: {
       ...result.schedule,
-      status: computeSessionStatus(input.date, input.startTime, input.endTime, true),
+      status: computeClinicSessionStatus(input.date, input.startTime, input.endTime, true),
     },
   };
 };
@@ -152,9 +122,7 @@ export const getDoctorMonthlySchedule = async (doctorUserId: number, month: stri
     throw createStatusError("month must be in YYYY-MM format", 400);
   }
 
-  const fromDate = `${month}-01`;
-  const cursor = new Date(`${fromDate}T00:00:00`);
-  const toDate = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).toISOString().slice(0, 10);
+  const { fromDate, toDate } = getMonthDateRange(month);
   const doctorProfileId = await getDoctorProfileId(doctorUserId);
 
   const result = await pool.query<SessionRow>(
@@ -164,9 +132,11 @@ export const getDoctorMonthlySchedule = async (doctorUserId: number, month: stri
         s.date::text AS date,
         s.start_time::text AS start_time,
         s.end_time::text AS end_time,
+        s.slot_duration,
         s.max_patients,
         s.is_active,
         s.status,
+        s.medical_center_id AS clinic_id,
         mc.name AS clinic_name,
         COUNT(b.id)::int AS patient_count
       FROM medical_center_doctor_schedule s
@@ -193,12 +163,14 @@ export const getDoctorMonthlySchedule = async (doctorUserId: number, month: stri
       const existing = accumulator.find((item) => item.date === dateKey);
       const session = {
         id: row.id,
+        clinicId: row.clinic_id,
         clinicName: row.clinic_name,
         startTime: normalizeTime(row.start_time),
         endTime: normalizeTime(row.end_time),
+        slotDuration: row.slot_duration,
         patientsCount: Number(row.patient_count || 0),
         maxPatients: row.max_patients,
-        status: computeSessionStatus(row.date, row.start_time, row.end_time, row.is_active),
+        status: computeClinicSessionStatus(row.date, row.start_time, row.end_time, row.is_active),
       };
 
       if (existing) {

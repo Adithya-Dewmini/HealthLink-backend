@@ -12,6 +12,7 @@ import {
   requireDoctorIdForUser,
   resolveStartableSchedule,
 } from "../services/doctorQueue.service";
+import { emitClinicPublicQueueUpdate } from "../services/clinicRealtime.service";
 
 type QueueStartBody = {
   scheduleId?: number | string | null;
@@ -74,7 +75,14 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
 
 const broadcastQueueUpdate = (
   doctorId: number | string,
-  payload: { queueId: number; type: string; triggeredBy?: string; patientId?: number | string }
+  payload: {
+    queueId: number;
+    type: string;
+    triggeredBy?: string;
+    patientId?: number | string;
+    medicalCenterId?: string | null;
+    sessionId?: number | null;
+  }
 ) => {
   const enrichedPayload = { ...payload, doctorId };
   io.to(doctorRoom(doctorId)).emit("queue:update", enrichedPayload);
@@ -87,6 +95,15 @@ const broadcastQueueUpdate = (
   if (payload.patientId) {
     io.to(patientRoom(payload.patientId)).emit("queue:update", enrichedPayload);
     io.to(patientRoom(payload.patientId)).emit("queueUpdated", enrichedPayload);
+  }
+  if (payload.medicalCenterId) {
+    emitClinicPublicQueueUpdate({
+      clinicId: payload.medicalCenterId,
+      doctorId,
+      queueId: payload.queueId,
+      sessionId: payload.sessionId ?? null,
+      type: payload.type,
+    });
   }
 };
 
@@ -128,7 +145,7 @@ export const startQueue = async (
     const doctorId = await requireDoctorIdForUser(userId);
     const activeSchedule = await resolveStartableSchedule(doctorId, requestedScheduleId);
 
-    if (!activeSchedule?.id) {
+    if (!activeSchedule) {
       return res.status(400).json({ message: "No active session found for this time" });
     }
 
@@ -182,6 +199,8 @@ export const startQueue = async (
         queueId: queueIdToEnd,
         type: "CLINIC_ENDED",
         triggeredBy: req.user?.role,
+        medicalCenterId: activeSchedule.medical_center_id,
+        sessionId: activeSchedule.id,
       });
 
       try {
@@ -191,6 +210,8 @@ export const startQueue = async (
             type: "CLINIC_ENDED",
             triggeredBy: req.user?.role,
             patientId,
+            medicalCenterId: activeSchedule.medical_center_id,
+            sessionId: activeSchedule.id,
           });
         });
       } catch (error) {
@@ -244,9 +265,6 @@ export const startQueue = async (
     }
 
     const newQueue = newQueueResult.rows[0];
-    const shiftStart = activeSchedule.start_time ?? null;
-    const shiftEnd = activeSchedule.end_time ?? null;
-
     await pool.query(
       `
       INSERT INTO queue_patients (queue_id, doctor_id, patient_id, token_number, status, medical_center_id)
@@ -256,12 +274,12 @@ export const startQueue = async (
         b.patient_id,
         ROW_NUMBER() OVER (ORDER BY b.time ASC),
         'WAITING',
-        $5
+        $4
       FROM bookings b
       WHERE b.doctor_id = $2
+        AND b.medical_center_id = $4
+        AND b.session_id = $3
         AND b.date = ${APP_DATE_SQL}
-        AND ($3::time IS NULL OR b.time >= $3)
-        AND ($4::time IS NULL OR b.time <= $4)
         AND NOT EXISTS (
           SELECT 1
           FROM queue_patients qp
@@ -269,13 +287,15 @@ export const startQueue = async (
             AND qp.patient_id = b.patient_id
         )
       `,
-      [newQueue.id, doctorId, shiftStart, shiftEnd, newQueue.medical_center_id ?? null]
+      [newQueue.id, doctorId, activeSchedule.id, newQueue.medical_center_id ?? null]
     );
 
     broadcastQueueUpdate(doctorId, {
       queueId: newQueue.id,
       type: "QUEUE_STARTED",
       triggeredBy: req.user?.role,
+      medicalCenterId: newQueue.medical_center_id,
+      sessionId: newQueue.schedule_id,
     });
 
     try {
@@ -285,6 +305,8 @@ export const startQueue = async (
           type: "QUEUE_STARTED",
           triggeredBy: req.user?.role,
           patientId,
+          medicalCenterId: newQueue.medical_center_id,
+          sessionId: newQueue.schedule_id,
         });
       });
     } catch (error) {
@@ -351,6 +373,8 @@ export const pauseQueue = async (req: DoctorQueueRequest, res: Response) => {
       queueId: updatedQueue.id,
       type: "QUEUE_PAUSED",
       triggeredBy: req.user?.role,
+      medicalCenterId: updatedQueue.medical_center_id,
+      sessionId: updatedQueue.schedule_id,
     });
 
     return res.json({
@@ -393,6 +417,8 @@ export const resumeQueue = async (req: DoctorQueueRequest, res: Response) => {
       queueId: updatedQueue.id,
       type: "QUEUE_RESUMED",
       triggeredBy: req.user?.role,
+      medicalCenterId: updatedQueue.medical_center_id,
+      sessionId: updatedQueue.schedule_id,
     });
 
     return res.json({
@@ -484,6 +510,8 @@ export const addPatientToQueue = async (
       queueId: queue.id,
       type: "PATIENT_ADDED",
       triggeredBy: req.user?.role,
+      medicalCenterId: queue.medical_center_id,
+      sessionId: queue.schedule_id,
     });
 
     return res.json({
@@ -569,6 +597,8 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
         queueId: queue.id,
         type: "QUEUE_EMPTY",
         triggeredBy: req.user?.role,
+        medicalCenterId: queue.medical_center_id,
+        sessionId: queue.schedule_id,
       });
 
       try {
@@ -675,6 +705,8 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
       queueId: queue.id,
       type: "NEXT_PATIENT",
       triggeredBy: req.user?.role,
+      medicalCenterId: queue.medical_center_id,
+      sessionId: queue.schedule_id,
     });
 
     try {
@@ -684,6 +716,8 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
           type: "NEXT_PATIENT",
           triggeredBy: req.user?.role,
           patientId,
+          medicalCenterId: queue.medical_center_id,
+          sessionId: queue.schedule_id,
         });
       });
     } catch (error) {
@@ -759,6 +793,8 @@ export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
         queueId: queue.id,
         type: "QUEUE_EMPTY",
         triggeredBy: req.user?.role,
+        medicalCenterId: queue.medical_center_id,
+        sessionId: queue.schedule_id,
       });
 
       try {
@@ -802,6 +838,8 @@ export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
       type: "PATIENT_MISSED",
       triggeredBy: req.user?.role,
       patientId: missedPatientId ?? undefined,
+      medicalCenterId: queue.medical_center_id,
+      sessionId: queue.schedule_id,
     });
 
     try {
@@ -897,6 +935,8 @@ export const endQueue = async (req: DoctorQueueRequest, res: Response) => {
       queueId: queue.id,
       type: "CLINIC_ENDED",
       triggeredBy: req.user?.role,
+      medicalCenterId: queue.medical_center_id,
+      sessionId: queue.schedule_id,
     });
 
     try {
@@ -906,6 +946,8 @@ export const endQueue = async (req: DoctorQueueRequest, res: Response) => {
           type: "CLINIC_ENDED",
           triggeredBy: req.user?.role,
           patientId,
+          medicalCenterId: queue.medical_center_id,
+          sessionId: queue.schedule_id,
         });
       });
     } catch (error) {

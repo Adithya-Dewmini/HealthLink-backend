@@ -37,6 +37,7 @@ const normalizePermissionsInput = (
   can_manage_queue: Boolean(value?.can_manage_queue),
   can_manage_appointments: Boolean(value?.can_manage_appointments),
   can_check_in: Boolean(value?.can_check_in),
+  schedule_management: Boolean(value?.schedule_management),
 });
 
 const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);

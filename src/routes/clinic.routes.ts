@@ -1,22 +1,18 @@
 import express from "express";
-import authMiddleware from "../middleware/authMiddleware";
+import { authenticateToken } from "../middleware/authenticateToken";
 import {
+  getClinicDetails,
   getClinicDoctorSchedule,
-  getClinicDoctors,
   getClinics,
-} from "../controllers/patientDoctor.controller";
-import { listClinicDoctorsForAdminController } from "../controllers/medicalCenterDoctorAssignment.controller";
+  getClinicDoctors,
+} from "../controllers/patientClinic.controller";
 
 const router = express.Router();
 
-router.get("/", authMiddleware, getClinics);
-router.get("/:clinicId/doctors", authMiddleware, (req, res) => {
-  const role = String((req as any).user?.role || "").toLowerCase();
-  if (role === "medical_center_admin") {
-    return (listClinicDoctorsForAdminController as any)(req, res);
-  }
-  return getClinicDoctors(req, res);
-});
-router.get("/:clinicId/doctors/:doctorId/schedule", authMiddleware, getClinicDoctorSchedule);
+router.use(authenticateToken);
+router.get("/", getClinics);
+router.get("/:clinicId", getClinicDetails);
+router.get("/:clinicId/doctors", getClinicDoctors);
+router.get("/:clinicId/doctors/:doctorId/schedule", getClinicDoctorSchedule);
 
 export default router;

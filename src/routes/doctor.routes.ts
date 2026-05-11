@@ -9,23 +9,26 @@ import {
   editAvailability,
   getDailyReport,
   getDashboard,
-  getDoctorMe,
   getAvailability,
   getQueueDashboard,
   getWorkingDays,
   removeAvailability,
   saveWorkingDays,
-  updateDoctorMe,
 } from "../controllers/doctor.controller";
+import {
+  getDoctorMeController,
+  updateDoctorMeController,
+} from "../controllers/doctorSelfProfile.controller";
 import {
   acceptDoctorInviteController as acceptDoctorInviteActionController,
   requestToJoinMedicalCenterController as requestToJoinCenterActionController,
 } from "../controllers/doctorAssociation.controller";
 import { getDoctorScheduleOverviewController } from "../controllers/doctorSchedule.controller";
 import {
-  createDoctorRoutineController,
-  getDoctorRoutineController,
-} from "../controllers/doctorRoutine.controller";
+  createDoctorExternalSessionController,
+  deleteDoctorExternalSessionController,
+  listDoctorExternalSessionsController,
+} from "../controllers/doctorExternalSession.controller";
 import {
   addPatientToQueue,
   endQueue,
@@ -35,7 +38,10 @@ import {
   skipPatient,
   startQueue,
 } from "../controllers/doctorQueue.controller";
-import { getDoctorSessionsRangeController } from "../controllers/doctorSchedule.controller";
+import {
+  getDoctorPrescriptionDetailController,
+  listDoctorPrescriptionsController,
+} from "../controllers/doctorPrescription.controller";
 
 const router = express.Router();
 
@@ -52,6 +58,9 @@ router.post(
   requestToJoinCenterActionController
 );
 
+router.get("/me", authenticateToken, getDoctorMeController);
+router.put("/me", authenticateToken, updateDoctorMeController);
+
 router.post("/availability", authenticateToken, createAvailability);
 router.get("/availability", authenticateToken, getAvailability);
 router.post("/working-days", authenticateToken, saveWorkingDays);
@@ -59,12 +68,20 @@ router.get("/working-days", authenticateToken, getWorkingDays);
 router.delete("/availability/:id", authenticateToken, removeAvailability);
 router.put("/availability/:id", authenticateToken, editAvailability);
 router.get("/schedule-overview", authenticateToken, getDoctorScheduleOverviewController);
-router.get("/sessions", authenticateToken, getDoctorSessionsRangeController);
-router.get("/routine", authenticateToken, getDoctorRoutineController);
-router.post("/routine", authenticateToken, createDoctorRoutineController);
+router.get("/external-sessions", authenticateToken, listDoctorExternalSessionsController);
+router.post("/external-sessions", authenticateToken, createDoctorExternalSessionController);
+router.delete(
+  "/external-sessions/:externalSessionId",
+  authenticateToken,
+  deleteDoctorExternalSessionController
+);
+router.get("/prescriptions", authenticateToken, listDoctorPrescriptionsController);
+router.get(
+  "/prescriptions/:prescriptionId",
+  authenticateToken,
+  getDoctorPrescriptionDetailController
+);
 router.get("/dashboard", authenticateToken, getDashboard);
-router.get("/me", authenticateToken, getDoctorMe);
-router.put("/me", authenticateToken, updateDoctorMe);
 
 router.post("/queue/start", authenticateToken, startQueue);
 router.post("/queue/pause", authenticateToken, pauseQueue);

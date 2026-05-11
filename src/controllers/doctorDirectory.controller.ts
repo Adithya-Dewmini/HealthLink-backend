@@ -13,6 +13,7 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
 
 export const searchDoctorsDirectoryController: RequestHandler = async (req, res: Response) => {
   try {
+    const typedReq = req as AuthenticatedRequest;
     const query = typeof req.query.query === "string" ? req.query.query : undefined;
     const specialization =
       typeof req.query.specialization === "string" ? req.query.specialization : undefined;
@@ -25,6 +26,10 @@ export const searchDoctorsDirectoryController: RequestHandler = async (req, res:
       limit,
       offset,
       includeEmail: false,
+      medicalCenterId:
+        typeof typedReq.medicalCenterId === "string" && typedReq.medicalCenterId.trim()
+          ? typedReq.medicalCenterId.trim()
+          : undefined,
     });
 
     return res.status(200).json(doctors);

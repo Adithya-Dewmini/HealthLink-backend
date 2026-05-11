@@ -9,9 +9,10 @@ export type JwtCenterMembership = {
 };
 
 export type JwtReceptionistPermissions = {
-  can_manage_queue: boolean;
-  can_manage_appointments: boolean;
-  can_check_in: boolean;
+  queue_access: boolean;
+  appointments: boolean;
+  check_in: boolean;
+  schedule_management: boolean;
 };
 
 export type JwtPayload = {

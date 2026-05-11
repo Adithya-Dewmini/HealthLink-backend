@@ -6,7 +6,9 @@ import {
   setPasswordFromToken,
   validatePasswordResetToken,
 } from "../services/auth.service";
+import { createAuditLog, getAuditRequestContext } from "../services/audit.service";
 import type {
+  AuthenticatedRequest,
   LoginRequestBody,
   ResetPasswordRequestBody,
   SetPasswordRequestBody,
@@ -33,12 +35,47 @@ export const loginUser = async (req: Request<never, unknown, LoginRequestBody>, 
       expoPushToken,
     });
 
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: result.user?.id ?? null,
+      actorRole: result.user?.role ?? null,
+      userId: result.user?.id ?? null,
+      action: "login",
+      entityType: "user",
+      entityId: result.user?.id ?? null,
+      metadata: {
+        email,
+      },
+    });
+
     return res.status(200).json(result);
   } catch (error: unknown) {
     const appError = error as HttpError;
     const statusCode = Number(appError?.statusCode) || 500;
     return res.status(statusCode).json({
       message: appError?.message || "Failed to login",
+    });
+  }
+};
+
+export const logoutUser = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      action: "logout",
+      entityType: "user",
+      entityId: req.user?.id ?? null,
+      metadata: {
+        source: "client_logout",
+      },
+    });
+
+    return res.status(200).json({ success: true, message: "Logged out successfully" });
+  } catch (error: unknown) {
+    const appError = error as HttpError;
+    const statusCode = Number(appError?.statusCode) || 500;
+    return res.status(statusCode).json({
+      message: appError?.message || "Failed to logout",
     });
   }
 };

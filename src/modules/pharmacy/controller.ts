@@ -1,4 +1,8 @@
 import type { Request, Response } from "express";
+import type { AuthenticatedRequest } from "../../types/auth";
+import { verifyPrescriptionToken } from "../../services/prescription.service";
+import { createAuditLog, getAuditRequestContext } from "../../services/audit.service";
+import { assertVerifiedPharmacyForUser } from "../../services/verification.service";
 import { isHttpError } from "./errors";
 import {
   createBrand,
@@ -9,6 +13,7 @@ import {
   deleteMedicine,
   dispensePrescription,
   dispensePrescriptionById,
+  fetchPharmacyProfileByUserId,
   fetchBrands,
   fetchCategories,
   fetchInventory,
@@ -23,7 +28,6 @@ import {
   validateDemandLogPayload,
   validateDispensePayload,
   validateMedicineId,
-  validateOptionalPharmacyId,
   validatePrescriptionId,
   validateQrToken,
   validateRestockMedicinePayload,
@@ -43,21 +47,79 @@ const handleError = (res: Response, error: unknown, fallbackMessage: string) => 
   return res.status(500).json({ message: fallbackMessage });
 };
 
+export const requireVerifiedPharmacistUser = async (req: Request) => {
+  const typedReq = req as AuthenticatedRequest;
+  const userId = typedReq.user?.id;
+  const role = String(typedReq.user?.role || "").toLowerCase();
+
+  if (!userId) {
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  }
+
+  if (role !== "pharmacist") {
+    throw Object.assign(new Error("Only pharmacists can dispense"), { statusCode: 403 });
+  }
+
+  await assertVerifiedPharmacyForUser(userId);
+  return userId;
+};
+
+const requirePharmacistUser = (req: Request) => {
+  const typedReq = req as AuthenticatedRequest;
+  const userId = typedReq.user?.id;
+  const role = String(typedReq.user?.role || "").toLowerCase();
+
+  if (!userId) {
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  }
+
+  if (role !== "pharmacist") {
+    throw Object.assign(new Error("Only pharmacists can access this resource"), { statusCode: 403 });
+  }
+
+  return userId;
+};
+
 export const getPrescriptionByQrController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const qrToken = validateQrToken(req.params.qrToken);
-    const pharmacyId = validateOptionalPharmacyId(req.query.pharmacy_id);
-    const data = await fetchPrescriptionByQr(qrToken, pharmacyId);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    await verifyPrescriptionToken(qrToken);
+    const data = await fetchPrescriptionByQr(qrToken, String(pharmacy.id));
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "prescription_qr_scanned",
+      entityType: "prescription",
+      entityId: data?.prescription?.id ?? null,
+      metadata: {
+        pharmacyId: pharmacy.id,
+      },
+    });
+    if (data?.prescription?.dispensedAt) {
+      return res.status(409).json({ message: "Prescription has already been dispensed" });
+    }
     return res.json(data);
   } catch (error) {
+    const typedError = error as { name?: string };
+    if (typedError?.name === "TokenExpiredError") {
+      return res.status(410).json({ message: "Expired prescription QR" });
+    }
+    if (typedError?.name === "JsonWebTokenError" || typedError?.name === "NotBeforeError") {
+      return res.status(401).json({ message: "Invalid QR code" });
+    }
     return handleError(res, error, "Failed to fetch prescription");
   }
 };
 
 export const getPrescriptionByIdController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const prescriptionId = validatePrescriptionId(req.params.id);
-    const data = await fetchPrescriptionById(prescriptionId);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await fetchPrescriptionById(prescriptionId, String(pharmacy.id));
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to fetch prescription");
@@ -66,15 +128,28 @@ export const getPrescriptionByIdController = async (req: Request, res: Response)
 
 export const getInventoryController = async (_req: Request, res: Response) => {
   try {
-    const data = await fetchInventory();
+    const pharmacistUserId = await requireVerifiedPharmacistUser(_req);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await fetchInventory(pharmacy.id);
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to fetch inventory");
   }
 };
 
+export const getPharmacyProfileController = async (req: Request, res: Response) => {
+  try {
+    const pharmacistUserId = requirePharmacistUser(req);
+    const data = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    return res.json(data);
+  } catch (error) {
+    return handleError(res, error, "Failed to fetch pharmacy profile");
+  }
+};
+
 export const getCategoriesController = async (_req: Request, res: Response) => {
   try {
+    await requireVerifiedPharmacistUser(_req);
     const data = await fetchCategories();
     return res.json(data);
   } catch (error) {
@@ -84,6 +159,7 @@ export const getCategoriesController = async (_req: Request, res: Response) => {
 
 export const createCategoryController = async (req: Request, res: Response) => {
   try {
+    await requireVerifiedPharmacistUser(req);
     const payload = validateCreateLookupPayload(req.body);
     const data = await createCategory(payload);
     return res.status(201).json(data);
@@ -94,6 +170,7 @@ export const createCategoryController = async (req: Request, res: Response) => {
 
 export const getBrandsController = async (_req: Request, res: Response) => {
   try {
+    await requireVerifiedPharmacistUser(_req);
     const data = await fetchBrands();
     return res.json(data);
   } catch (error) {
@@ -103,6 +180,7 @@ export const getBrandsController = async (_req: Request, res: Response) => {
 
 export const createBrandController = async (req: Request, res: Response) => {
   try {
+    await requireVerifiedPharmacistUser(req);
     const payload = validateCreateLookupPayload(req.body);
     const data = await createBrand(payload);
     return res.status(201).json(data);
@@ -113,8 +191,22 @@ export const createBrandController = async (req: Request, res: Response) => {
 
 export const dispensePrescriptionController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const payload = validateDispensePayload(req.body);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
     const data = await dispensePrescription(payload);
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "prescription_dispensed",
+      entityType: "prescription",
+      entityId: payload.prescriptionId ?? null,
+      metadata: {
+        pharmacyId: pharmacy.id,
+        partial: Boolean(data?.is_partial),
+      },
+    });
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to dispense prescription");
@@ -123,9 +215,25 @@ export const dispensePrescriptionController = async (req: Request, res: Response
 
 export const dispensePrescriptionByIdController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const prescriptionId = validatePrescriptionId(req.params.prescriptionId);
-    const pharmacistUserId = (req as any)?.user?.id ?? null;
-    const data = await dispensePrescriptionById({ prescriptionId, pharmacistUserId });
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await dispensePrescriptionById({
+      prescriptionId,
+      pharmacistUserId,
+      pharmacyId: pharmacy.id,
+    });
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "prescription_dispensed",
+      entityType: "prescription",
+      entityId: prescriptionId,
+      metadata: {
+        pharmacyId: pharmacy.id,
+      },
+    });
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to dispense prescription");
@@ -134,8 +242,14 @@ export const dispensePrescriptionByIdController = async (req: Request, res: Resp
 
 export const createSaleController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const payload = validateSalePayload(req.body);
-    const data = await createSale(payload);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await createSale({
+      ...payload,
+      pharmacyId: pharmacy.id,
+      pharmacistUserId,
+    });
     return res.status(201).json(data);
   } catch (error) {
     return handleError(res, error, "Failed to create sale");
@@ -144,8 +258,13 @@ export const createSaleController = async (req: Request, res: Response) => {
 
 export const createDemandLogController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const payload = validateDemandLogPayload(req.body);
-    const data = await createDemandLog(payload);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await createDemandLog({
+      ...payload,
+      pharmacyId: pharmacy.id,
+    });
     return res.status(201).json(data);
   } catch (error) {
     return handleError(res, error, "Failed to create demand log");
@@ -154,10 +273,22 @@ export const createDemandLogController = async (req: Request, res: Response) => 
 
 export const createMedicineController = async (req: Request, res: Response) => {
   try {
-    console.log("Create medicine request body:", req.body);
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const payload = validateCreateMedicinePayload(req.body);
-    const data = await createMedicine(payload);
-    console.log("Inserted medicine ID:", data?.medicine?.id);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await createMedicine(payload, pharmacy.id);
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "inventory_created",
+      entityType: "inventory",
+      entityId: data?.medicine?.id ?? null,
+      metadata: {
+        pharmacyId: pharmacy.id,
+        name: payload.name,
+      },
+    });
     return res.status(201).json(data);
   } catch (error) {
     return handleError(res, error, "Failed to save medicine");
@@ -166,8 +297,21 @@ export const createMedicineController = async (req: Request, res: Response) => {
 
 export const updateMedicineController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const payload = validateUpdateMedicinePayload(req.params.id, req.body);
-    const data = await updateMedicine(payload);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await updateMedicine(payload, pharmacy.id);
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "inventory_updated",
+      entityType: "inventory",
+      entityId: payload.id,
+      metadata: {
+        pharmacyId: pharmacy.id,
+      },
+    });
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to update medicine");
@@ -176,8 +320,23 @@ export const updateMedicineController = async (req: Request, res: Response) => {
 
 export const restockMedicineController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const payload = validateRestockMedicinePayload(req.params.id, req.body);
-    const data = await restockMedicine(payload);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await restockMedicine(payload, pharmacy.id);
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "inventory_updated",
+      entityType: "inventory",
+      entityId: payload.id,
+      metadata: {
+        pharmacyId: pharmacy.id,
+        kind: "restock",
+        quantity: payload.quantity,
+      },
+    });
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to restock medicine");
@@ -186,8 +345,21 @@ export const restockMedicineController = async (req: Request, res: Response) => 
 
 export const deleteMedicineController = async (req: Request, res: Response) => {
   try {
+    const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const id = validateMedicineId(req.params.id);
-    const data = await deleteMedicine(id);
+    const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+    const data = await deleteMedicine(id, pharmacy.id);
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      userId: pharmacistUserId,
+      action: "inventory_deleted",
+      entityType: "inventory",
+      entityId: id,
+      metadata: {
+        pharmacyId: pharmacy.id,
+      },
+    });
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to delete medicine");

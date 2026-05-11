@@ -11,11 +11,18 @@ type QueueRow = {
   doctor_id: number;
   status: string;
   shift_id: number | null;
+  schedule_id?: number | null;
   shift_date: string;
   medical_center_id: string | null;
   started_at?: string | null;
 };
 type ShiftRow = { id: number };
+type StartableScheduleRow = {
+  id: number;
+  medical_center_id: string;
+  start_time: string;
+  end_time: string;
+};
 
 type Queryable = {
   query: <TRow = any>(text: string, params?: unknown[]) => Promise<{ rows: TRow[] }>;
@@ -87,6 +94,47 @@ export const resolveStartableShiftId = async (
   );
 
   return activeShift.rows[0]?.id ?? null;
+};
+
+export const resolveStartableSchedule = async (
+  doctorId: number,
+  requestedScheduleId?: number | string | null,
+  db: Queryable = pool
+) => {
+  if (requestedScheduleId) {
+    const requestedSchedule = await db.query<StartableScheduleRow>(
+      `
+      SELECT id, medical_center_id, start_time::text AS start_time, end_time::text AS end_time
+      FROM medical_center_doctor_schedule
+      WHERE id = $1
+        AND doctor_profile_id = $2
+        AND date = ${APP_DATE_SQL}
+        AND is_active = TRUE
+      LIMIT 1
+      `,
+      [requestedScheduleId, doctorId]
+    );
+
+    return requestedSchedule.rows[0] ?? null;
+  }
+
+  const activeOrUpcomingSchedule = await db.query<StartableScheduleRow>(
+    `
+    SELECT id, medical_center_id, start_time::text AS start_time, end_time::text AS end_time
+    FROM medical_center_doctor_schedule
+    WHERE doctor_profile_id = $1
+      AND date = ${APP_DATE_SQL}
+      AND is_active = TRUE
+      AND end_time >= ${APP_TIME_SQL}
+    ORDER BY
+      CASE WHEN start_time <= ${APP_TIME_SQL} AND end_time >= ${APP_TIME_SQL} THEN 0 ELSE 1 END,
+      start_time ASC
+    LIMIT 1
+    `,
+    [doctorId]
+  );
+
+  return activeOrUpcomingSchedule.rows[0] ?? null;
 };
 
 export const getLatestQueueForDoctorToday = async (doctorId: number, db: Queryable = pool) => {

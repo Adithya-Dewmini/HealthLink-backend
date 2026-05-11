@@ -80,13 +80,55 @@ export const markMissedBookings = async (
         missed_at = COALESCE(b.missed_at, NOW())
     FROM target
     WHERE b.id = target.id
-    RETURNING b.id, target.old_status, b.status AS new_status
+    RETURNING b.id, b.patient_id, b.session_id, b.doctor_id, target.old_status, b.status AS new_status
     `,
     params
   );
 
   for (const row of result.rows) {
     console.log("STATUS CHANGE:", row.id, row.old_status, row.new_status);
+  }
+
+  const missedBookingIds = result.rows.map((row) => Number(row.id)).filter(Number.isFinite);
+  if (missedBookingIds.length > 0) {
+    await client.query(
+      `
+      WITH missed AS (
+        UPDATE queue_patients qp
+        SET status = 'MISSED',
+            missed_at = COALESCE(qp.missed_at, NOW())
+        FROM bookings b
+        WHERE b.id = ANY($1::int[])
+          AND qp.patient_id = b.patient_id
+          AND (
+            qp.session_id = b.session_id
+            OR (qp.session_id IS NULL AND qp.doctor_id = b.doctor_id)
+          )
+          AND qp.status IN ('WAITING', 'WITH_DOCTOR')
+        RETURNING qp.queue_id
+      ),
+      affected AS (
+        SELECT DISTINCT queue_id
+        FROM missed
+      ),
+      ordered AS (
+        SELECT
+          qp.id,
+          ROW_NUMBER() OVER (
+            PARTITION BY qp.queue_id
+            ORDER BY qp.token_number ASC, qp.id ASC
+          ) AS next_token
+        FROM queue_patients qp
+        JOIN affected a ON a.queue_id = qp.queue_id
+        WHERE qp.status IN ('WAITING', 'WITH_DOCTOR')
+      )
+      UPDATE queue_patients qp
+      SET token_number = ordered.next_token
+      FROM ordered
+      WHERE qp.id = ordered.id
+      `,
+      [missedBookingIds]
+    );
   }
 
   return result;

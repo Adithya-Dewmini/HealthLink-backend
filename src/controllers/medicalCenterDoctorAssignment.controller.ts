@@ -9,6 +9,7 @@ import {
   removeDoctorFromMedicalCenter,
   resendDoctorInvite,
   reviewDoctorJoinRequest,
+  updateDoctorRelationshipDisplayFlags,
   updateDoctorRelationshipStatus,
 } from "../services/doctorAssociation.service";
 
@@ -23,6 +24,11 @@ type DoctorRequestActionBody = {
 
 type DoctorRelationshipStatusBody = {
   status?: "ACTIVE" | "INACTIVE";
+};
+
+type DoctorRelationshipDisplayBody = {
+  pinned?: boolean;
+  hidden?: boolean;
 };
 
 type RouteParams = {
@@ -186,5 +192,33 @@ export const removeDoctorFromMedicalCenterController: RequestHandler = async (
     return res.status(200).json(result);
   } catch (error) {
     return handleControllerError(res, error, "Failed to remove doctor from medical center");
+  }
+};
+
+export const updateDoctorRelationshipDisplayController: RequestHandler = async (
+  req,
+  res: Response
+) => {
+  const typedReq = req as CenterActionRequest<DoctorRelationshipDisplayBody>;
+  try {
+    const result = await updateDoctorRelationshipDisplayFlags({
+      medicalCenterId: typedReq.medicalCenterId,
+      relationshipId: typedReq.params.id,
+      pinned:
+        typeof typedReq.body?.pinned === "boolean" ? typedReq.body.pinned : undefined,
+      hidden:
+        typeof typedReq.body?.hidden === "boolean" ? typedReq.body.hidden : undefined,
+    });
+
+    emitCenterEvent(typedReq.medicalCenterId, "doctor:status", {
+      type: "doctor_relationship_display_updated",
+      relationshipId: typedReq.params.id,
+      is_pinned: result.is_pinned,
+      is_hidden: result.is_hidden,
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    return handleControllerError(res, error, "Failed to update doctor display settings");
   }
 };

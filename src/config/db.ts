@@ -1,4 +1,4 @@
-import pkg, { type PoolClient } from "pg";
+import { Pool } from "pg";
 import { env } from "./env";
 import {
   BOOKING_STATUS,
@@ -6,192 +6,40 @@ import {
   normalizeBookingStatus,
 } from "../utils/bookingLifecycle";
 
-const { Pool } = pkg;
-
-const pool = new Pool({
+export const pool = new Pool({
   connectionString: env.databaseUrl,
-  ssl: env.pgSsl ? { rejectUnauthorized: false } : undefined,
-  keepAlive: true,
-  keepAliveInitialDelayMillis: 0,
-  connectionTimeoutMillis: env.pgConnectTimeoutMs,
-  idleTimeoutMillis: env.pgIdleTimeoutMs,
-  min: env.pgPoolMin,
+  ssl: env.pgSsl
+    ? {
+        rejectUnauthorized: false,
+      }
+    : false,
   max: env.pgPoolMax,
+  min: env.pgPoolMin,
+  idleTimeoutMillis: env.pgIdleTimeoutMs,
+  connectionTimeoutMillis: env.pgConnectTimeoutMs,
 });
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-type DbError = {
-  code?: string;
-  message?: string;
-};
-
-type GuardedPoolClient = PoolClient & {
-  __healthlinkBroken?: boolean;
-  __healthlinkReleaseWrapped?: boolean;
-  __healthlinkErrorListenerAttached?: boolean;
-};
-
-const isTransientDbError = (err: DbError) => {
-  const code = err?.code;
-  const message = String(err?.message || "");
-  return (
-    code === "ETIMEDOUT" ||
-    code === "ECONNRESET" ||
-    code === "ECONNREFUSED" ||
-    code === "57P01" || // admin shutdown
-    code === "57P02" || // crash shutdown
-    code === "57P03" || // cannot connect now
-    code === "08001" || // SQL client unable to establish
-    code === "08006" || // connection failure
-    /connection.*timeout/i.test(message) ||
-    /connection.*terminated/i.test(message)
-  );
-};
-
-const isBrokenClientState = (client: GuardedPoolClient) => {
-  const clientState = client as GuardedPoolClient & {
-    _ending?: boolean;
-    _ended?: boolean;
-    _queryable?: boolean;
-    connection?: {
-      stream?: {
-        destroyed?: boolean;
-      };
-    };
-  };
-
-  return (
-    clientState.__healthlinkBroken === true ||
-    clientState._ending === true ||
-    clientState._ended === true ||
-    clientState._queryable === false ||
-    clientState.connection?.stream?.destroyed === true
-  );
-};
-
-const markClientBroken = (client: GuardedPoolClient, err?: DbError) => {
-  if (isTransientDbError(err ?? {}) || isBrokenClientState(client)) {
-    client.__healthlinkBroken = true;
-  }
-};
-
-const originalConnect = pool.connect.bind(pool) as () => Promise<PoolClient>;
-pool.connect = (async () => {
-  const maxAttempts = env.pgQueryRetry;
-  let lastError: unknown;
-  let rawClient: PoolClient | null = null;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      rawClient = await originalConnect();
-      break;
-    } catch (err: unknown) {
-      lastError = err;
-      if (!isTransientDbError(err as DbError) || attempt === maxAttempts) {
-        throw err;
-      }
-      await sleep(300 * attempt);
-    }
-  }
-
-  if (!rawClient) {
-    throw lastError;
-  }
-
-  const client = rawClient as unknown as GuardedPoolClient;
-
-  if (!client.__healthlinkErrorListenerAttached) {
-    client.__healthlinkErrorListenerAttached = true;
-    client.on("error", (err: Error) => {
-      markClientBroken(client, err);
-    });
-  }
-
-  if (!client.__healthlinkReleaseWrapped) {
-    client.__healthlinkReleaseWrapped = true;
-
-    const originalClientQuery = client.query.bind(client);
-    client.query = (async (...args: Parameters<typeof originalClientQuery>) => {
-      try {
-        return await originalClientQuery(...args);
-      } catch (err: unknown) {
-        markClientBroken(client, err as DbError);
-        throw err;
-      }
-    }) as typeof client.query;
-
-    const originalRelease = client.release.bind(client);
-    client.release = ((err?: Error | boolean) => {
-      if (err) {
-        client.__healthlinkBroken = true;
-      }
-
-      const shouldDestroy = err || isBrokenClientState(client);
-      return shouldDestroy
-        ? originalRelease(err instanceof Error ? err : new Error("Discarding broken PostgreSQL client"))
-        : originalRelease();
-    }) as typeof client.release;
-  }
-
-  if (isBrokenClientState(client)) {
-    client.__healthlinkBroken = false;
-  }
-
-  return client;
-}) as unknown as typeof pool.connect;
-
-const originalQuery = pool.query.bind(pool);
-type QueryArgs = Parameters<typeof originalQuery>;
-// Retry transient connection failures on non-transactional queries.
-pool.query = (async (...args: QueryArgs) => {
-  const maxAttempts = env.pgQueryRetry;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await originalQuery(...args);
-    } catch (err: unknown) {
-      lastError = err;
-      if (!isTransientDbError(err as DbError) || attempt === maxAttempts) {
-        throw err;
-      }
-      await sleep(200 * attempt);
-    }
-  }
-  throw lastError;
-}) as any;
 
 pool.on("error", (err: Error) => {
-  if (isTransientDbError(err)) {
-    console.warn("PostgreSQL connection dropped; the pool will reconnect on demand.");
-    return;
-  }
-
-  console.error("❌ Unexpected PostgreSQL error:", err);
+  console.error("Unexpected DB error", err);
 });
 
-let keepAliveTimer: NodeJS.Timeout | null = null;
+const poolDebugTimer = setInterval(() => {
+  console.log({
+    total: pool.totalCount,
+    idle: pool.idleCount,
+    waiting: pool.waitingCount,
+  });
+}, 5000);
 
-const startPoolKeepAlive = () => {
-  if (keepAliveTimer || env.pgKeepAliveQueryMs <= 0) {
-    return;
-  }
+poolDebugTimer.unref?.();
 
-  keepAliveTimer = setInterval(() => {
-    void pool.query("SELECT 1").catch((err: unknown) => {
-      if (isTransientDbError(err as DbError)) {
-        console.warn("PostgreSQL keep-alive query failed; retrying on next interval.");
-        return;
-      }
-
-      console.error("PostgreSQL keep-alive query failed:", err);
-    });
-  }, env.pgKeepAliveQueryMs);
-
-  keepAliveTimer.unref?.();
+export const verifyDbConnection = async () => {
+  await pool.query("SELECT 1");
+  console.log("✅ DB connected");
 };
 
 export const initDb = async () => {
+  await verifyDbConnection();
   const client = await pool.connect();
 
   try {
@@ -247,6 +95,7 @@ export const initDb = async () => {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name VARCHAR(255) NOT NULL,
         address TEXT,
+        city TEXT,
         phone VARCHAR(20),
         email VARCHAR(255),
         admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -265,6 +114,7 @@ export const initDb = async () => {
       BEGIN
         IF to_regclass('public.medical_centers') IS NOT NULL THEN
           ALTER TABLE medical_centers ADD COLUMN IF NOT EXISTS admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+          ALTER TABLE medical_centers ADD COLUMN IF NOT EXISTS city TEXT;
           ALTER TABLE medical_centers ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'pending';
           ALTER TABLE medical_centers ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP;
           ALTER TABLE medical_centers ADD COLUMN IF NOT EXISTS verified_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
@@ -367,6 +217,50 @@ export const initDb = async () => {
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_password_setup_tokens_user_id
       ON password_setup_tokens(user_id)
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dashboard_banners (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title VARCHAR(255),
+        subtitle TEXT,
+        image_url TEXT NOT NULL,
+        target_type VARCHAR(80),
+        target_id TEXT,
+        target_screen VARCHAR(120),
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        start_date TIMESTAMPTZ,
+        end_date TIMESTAMPTZ,
+        created_by UUID,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.dashboard_banners') IS NOT NULL THEN
+          ALTER TABLE dashboard_banners ALTER COLUMN title DROP NOT NULL;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS subtitle TEXT;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS target_type VARCHAR(80);
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS target_id TEXT;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS target_screen VARCHAR(120);
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS start_date TIMESTAMPTZ;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS end_date TIMESTAMPTZ;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS created_by UUID;
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+          ALTER TABLE dashboard_banners ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_dashboard_banners_patient_active
+      ON dashboard_banners (is_active, sort_order, created_at DESC)
     `);
 
     await client.query(`
@@ -498,9 +392,15 @@ export const initDb = async () => {
         can_manage_queue BOOLEAN NOT NULL DEFAULT FALSE,
         can_manage_appointments BOOLEAN NOT NULL DEFAULT FALSE,
         can_check_in BOOLEAN NOT NULL DEFAULT FALSE,
+        schedule_management BOOLEAN NOT NULL DEFAULT FALSE,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (user_id, medical_center_id)
       )
+    `);
+
+    await client.query(`
+      ALTER TABLE IF EXISTS receptionist_permissions
+      ADD COLUMN IF NOT EXISTS schedule_management BOOLEAN NOT NULL DEFAULT FALSE
     `);
 
     await client.query(`
@@ -524,17 +424,26 @@ export const initDb = async () => {
     await client.query(`
       ALTER TABLE IF EXISTS audit_logs
       ADD COLUMN IF NOT EXISTS actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS actor_role TEXT,
       ADD COLUMN IF NOT EXISTS entity_type TEXT,
       ADD COLUMN IF NOT EXISTS entity_id TEXT,
       ADD COLUMN IF NOT EXISTS notes JSONB,
+      ADD COLUMN IF NOT EXISTS ip_address TEXT,
+      ADD COLUMN IF NOT EXISTS user_agent TEXT,
+      ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
     `);
 
     await client.query(`
       UPDATE audit_logs
-      SET actor_id = COALESCE(actor_id, user_id)
+      SET
+        actor_id = COALESCE(actor_id, user_id),
+        actor_user_id = COALESCE(actor_user_id, actor_id, user_id),
+        metadata = COALESCE(metadata, notes, '{}'::jsonb)
       WHERE actor_id IS NULL
-        AND user_id IS NOT NULL;
+         OR actor_user_id IS NULL
+         OR metadata IS NULL;
     `);
 
     await client.query(`
@@ -545,6 +454,21 @@ export const initDb = async () => {
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_type_id
       ON audit_logs (entity_type, entity_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_user_created
+      ON audit_logs (actor_user_id, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_role_created
+      ON audit_logs (actor_role, created_at DESC);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created
+      ON audit_logs (action, created_at DESC);
     `);
 
     await client.query(`
@@ -727,6 +651,8 @@ export const initDb = async () => {
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL,
         location TEXT,
+        phone TEXT,
+        email TEXT,
         image_url TEXT,
         rating NUMERIC(3,1),
         status TEXT,
@@ -743,6 +669,8 @@ export const initDb = async () => {
       BEGIN
         IF to_regclass('public.pharmacies') IS NOT NULL THEN
           ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS location TEXT;
+          ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS phone TEXT;
+          ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS email TEXT;
           ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS image_url TEXT;
           ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS logo_url TEXT;
           ALTER TABLE pharmacies ADD COLUMN IF NOT EXISTS cover_image_url TEXT;
@@ -780,6 +708,14 @@ export const initDb = async () => {
         image_url = EXCLUDED.image_url,
         rating = EXCLUDED.rating,
         status = EXCLUDED.status
+    `);
+
+    await client.query(`
+      SELECT setval(
+        pg_get_serial_sequence('pharmacies', 'id'),
+        GREATEST(COALESCE((SELECT MAX(id) FROM pharmacies), 0), 1),
+        true
+      )
     `);
 
     await client.query(`
@@ -1040,6 +976,20 @@ export const initDb = async () => {
     `);
 
     await client.query(`
+      UPDATE medical_centers
+      SET verification_status = 'approved'
+      WHERE LOWER(COALESCE(status, '')) = 'approved'
+        AND LOWER(COALESCE(verification_status, 'pending')) <> 'approved'
+    `);
+
+    await client.query(`
+      UPDATE medical_centers
+      SET status = 'ACTIVE'
+      WHERE LOWER(COALESCE(verification_status, 'pending')) = 'approved'
+        AND LOWER(COALESCE(status, '')) = 'approved'
+    `);
+
+    await client.query(`
       UPDATE doctors
       SET verification_status = 'approved'
       WHERE verification_status IS NULL
@@ -1054,14 +1004,51 @@ export const initDb = async () => {
     `);
 
     await client.query(`
+      UPDATE pharmacies
+      SET status = 'ACTIVE'
+      WHERE LOWER(COALESCE(verification_status, 'pending')) = 'approved'
+        AND LOWER(COALESCE(status, '')) IN ('', 'inactive', 'pending', 'approved')
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS favorites (
         id SERIAL PRIMARY KEY,
         patient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        item_id INTEGER NOT NULL,
-        item_type TEXT NOT NULL CHECK (item_type IN ('pharmacy', 'doctor')),
+        item_id INTEGER,
+        entity_id TEXT NOT NULL,
+        item_type TEXT NOT NULL CHECK (item_type IN ('pharmacy', 'doctor', 'medical_center')),
         created_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE (patient_id, item_id, item_type)
+        UNIQUE (patient_id, item_type, entity_id)
       )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.favorites') IS NOT NULL THEN
+          ALTER TABLE favorites ALTER COLUMN item_id DROP NOT NULL;
+          ALTER TABLE favorites ADD COLUMN IF NOT EXISTS entity_id TEXT;
+
+          UPDATE favorites
+          SET entity_id = COALESCE(entity_id, item_id::text)
+          WHERE entity_id IS NULL;
+
+          ALTER TABLE favorites ALTER COLUMN entity_id SET NOT NULL;
+
+          ALTER TABLE favorites DROP CONSTRAINT IF EXISTS favorites_patient_id_item_id_item_type_key;
+          ALTER TABLE favorites DROP CONSTRAINT IF EXISTS favorites_item_type_check;
+          ALTER TABLE favorites
+            ADD CONSTRAINT favorites_item_type_check
+            CHECK (item_type IN ('pharmacy', 'doctor', 'medical_center'));
+        END IF;
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_favorites_patient_entity_unique
+      ON favorites(patient_id, item_type, entity_id)
     `);
 
     await client.query(`
@@ -1585,11 +1572,95 @@ export const initDb = async () => {
 
     // Queue metrics support (if queue_patients exists).
     await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.queues') IS NULL
+          AND to_regclass('public.doctors') IS NOT NULL THEN
+          CREATE TABLE queues (
+            id SERIAL PRIMARY KEY,
+            doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
+            status VARCHAR(20) NOT NULL DEFAULT 'LIVE',
+            created_at TIMESTAMP DEFAULT NOW(),
+            started_at TIMESTAMP DEFAULT NOW(),
+            ended_at TIMESTAMP,
+            shift_id INTEGER,
+            schedule_id INTEGER,
+            shift_date DATE DEFAULT CURRENT_DATE,
+            medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE
+          );
+        END IF;
+
+        IF to_regclass('public.queue_patients') IS NULL
+          AND to_regclass('public.queues') IS NOT NULL
+          AND to_regclass('public.users') IS NOT NULL THEN
+          CREATE TABLE queue_patients (
+            id SERIAL PRIMARY KEY,
+            queue_id INTEGER REFERENCES queues(id) ON DELETE CASCADE,
+            doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
+            patient_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            token_number INTEGER NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'WAITING',
+            complaint TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
       ALTER TABLE IF EXISTS queue_patients
       ADD COLUMN IF NOT EXISTS started_at TIMESTAMP,
       ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP,
       ADD COLUMN IF NOT EXISTS consultation_id INTEGER,
-      ADD COLUMN IF NOT EXISTS missed_at TIMESTAMP;
+      ADD COLUMN IF NOT EXISTS missed_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS is_walkin BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'normal';
+    `);
+
+    await client.query(`
+      ALTER TABLE IF EXISTS queue_patients
+      DROP CONSTRAINT IF EXISTS queue_patients_priority_check,
+      ADD CONSTRAINT queue_patients_priority_check
+      CHECK (LOWER(priority) IN ('normal', 'urgent', 'emergency'));
+    `);
+
+    await client.query(`
+      DO $$
+      DECLARE
+        constraint_name TEXT;
+      BEGIN
+        IF to_regclass('public.queue_patients') IS NOT NULL THEN
+          UPDATE queue_patients qp
+          SET patient_id = NULL
+          WHERE patient_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM users u
+              WHERE u.id = qp.patient_id
+            );
+
+          FOR constraint_name IN
+            SELECT c.conname
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_attribute a
+              ON a.attrelid = t.oid
+             AND a.attnum = ANY(c.conkey)
+            WHERE t.relname = 'queue_patients'
+              AND a.attname = 'patient_id'
+              AND c.contype = 'f'
+          LOOP
+            EXECUTE format('ALTER TABLE queue_patients DROP CONSTRAINT %I', constraint_name);
+          END LOOP;
+
+          ALTER TABLE queue_patients
+          ADD CONSTRAINT queue_patients_patient_id_fkey
+          FOREIGN KEY (patient_id)
+          REFERENCES users(id)
+          ON DELETE CASCADE;
+        END IF;
+      END $$;
     `);
 
     await client.query(`
@@ -1677,6 +1748,8 @@ export const initDb = async () => {
         IF to_regclass('public.prescription_items') IS NOT NULL THEN
           ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS medicine_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL;
           ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1;
+          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS dispensed_quantity INTEGER DEFAULT 0;
+          UPDATE prescription_items SET dispensed_quantity = 0 WHERE dispensed_quantity IS NULL;
         END IF;
       END $$;
     `);
@@ -1741,6 +1814,10 @@ export const initDb = async () => {
           ALTER TABLE medicines ADD COLUMN IF NOT EXISTS brand_id INTEGER REFERENCES brands(id) ON DELETE SET NULL;
           ALTER TABLE medicines ADD COLUMN IF NOT EXISTS description TEXT;
           ALTER TABLE medicines ADD COLUMN IF NOT EXISTS image_url TEXT;
+          ALTER TABLE medicines ADD COLUMN IF NOT EXISTS generic_name TEXT;
+          ALTER TABLE medicines ADD COLUMN IF NOT EXISTS active_ingredient TEXT;
+          ALTER TABLE medicines ADD COLUMN IF NOT EXISTS strength TEXT;
+          ALTER TABLE medicines ADD COLUMN IF NOT EXISTS dosage_form TEXT;
           ALTER TABLE medicines ADD COLUMN IF NOT EXISTS quantity INT;
           ALTER TABLE medicines ADD COLUMN IF NOT EXISTS expiry_date DATE;
           ALTER TABLE medicines ADD COLUMN IF NOT EXISTS price DECIMAL(10,2);
@@ -1759,6 +1836,355 @@ export const initDb = async () => {
       END $$;
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS marketplace_products (
+        id BIGSERIAL PRIMARY KEY,
+        pharmacy_id INTEGER NOT NULL REFERENCES pharmacies(id) ON DELETE CASCADE,
+        inventory_item_id INTEGER NOT NULL REFERENCES medicines(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        generic_name TEXT,
+        brand TEXT,
+        description TEXT,
+        category TEXT,
+        price NUMERIC(10,2) NOT NULL,
+        discount_price NUMERIC(10,2),
+        image_url TEXT,
+        requires_prescription BOOLEAN NOT NULL DEFAULT FALSE,
+        is_featured BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.marketplace_products') IS NOT NULL THEN
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS inventory_item_id INTEGER REFERENCES medicines(id) ON DELETE CASCADE;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS name TEXT;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS generic_name TEXT;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS brand TEXT;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS description TEXT;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS category TEXT;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS price NUMERIC(10,2);
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS discount_price NUMERIC(10,2);
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS image_url TEXT;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS requires_prescription BOOLEAN NOT NULL DEFAULT FALSE;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS is_featured BOOLEAN NOT NULL DEFAULT FALSE;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE marketplace_products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_marketplace_products_pharmacy_inventory_unique
+      ON marketplace_products (pharmacy_id, inventory_item_id)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_marketplace_products_pharmacy_active
+      ON marketplace_products (pharmacy_id, is_active, is_featured, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_marketplace_products_search
+      ON marketplace_products (
+        LOWER(COALESCE(name, '')),
+        LOWER(COALESCE(generic_name, '')),
+        LOWER(COALESCE(brand, ''))
+      )
+    `);
+
+    await client.query(`
+      ALTER TABLE IF EXISTS inventory
+      ADD COLUMN IF NOT EXISTS reserved_quantity INTEGER NOT NULL DEFAULT 0
+    `);
+
+    await client.query(`
+      UPDATE inventory
+      SET reserved_quantity = 0
+      WHERE reserved_quantity IS NULL
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS carts (
+        id BIGSERIAL PRIMARY KEY,
+        patient_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE SET NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.carts') IS NOT NULL THEN
+          ALTER TABLE carts ADD COLUMN IF NOT EXISTS patient_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+          ALTER TABLE carts ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE SET NULL;
+          ALTER TABLE carts ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE carts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS cart_items (
+        id BIGSERIAL PRIMARY KEY,
+        cart_id BIGINT NOT NULL REFERENCES carts(id) ON DELETE CASCADE,
+        marketplace_product_id BIGINT NOT NULL REFERENCES marketplace_products(id) ON DELETE CASCADE,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE (cart_id, marketplace_product_id)
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.cart_items') IS NOT NULL THEN
+          ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS cart_id BIGINT REFERENCES carts(id) ON DELETE CASCADE;
+          ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS marketplace_product_id BIGINT REFERENCES marketplace_products(id) ON DELETE CASCADE;
+          ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS quantity INTEGER;
+          ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE cart_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id BIGSERIAL PRIMARY KEY,
+        patient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        pharmacy_id INTEGER NOT NULL REFERENCES pharmacies(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        subtotal NUMERIC(10,2) NOT NULL,
+        discount_total NUMERIC(10,2) NOT NULL DEFAULT 0,
+        total NUMERIC(10,2) NOT NULL,
+        fulfillment_type TEXT NOT NULL DEFAULT 'pickup',
+        notes TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+	    await client.query(`
+	      DO $$
+	      BEGIN
+	        IF to_regclass('public.orders') IS NOT NULL THEN
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS patient_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS prescription_id UUID REFERENCES prescriptions(id) ON DELETE SET NULL;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2);
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_total NUMERIC(10,2) NOT NULL DEFAULT 0;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS total NUMERIC(10,2);
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT NOT NULL DEFAULT 'pickup';
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address JSONB;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_notes TEXT;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_contact_name TEXT;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_contact_phone TEXT;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_started_at TIMESTAMP;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP;
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS order_items (
+        id BIGSERIAL PRIMARY KEY,
+        order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        marketplace_product_id BIGINT NOT NULL REFERENCES marketplace_products(id) ON DELETE RESTRICT,
+        inventory_item_id INTEGER NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        unit_price NUMERIC(10,2) NOT NULL,
+        total_price NUMERIC(10,2) NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+	    await client.query(`
+	      DO $$
+	      BEGIN
+	        IF to_regclass('public.order_items') IS NOT NULL THEN
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS marketplace_product_id BIGINT REFERENCES marketplace_products(id) ON DELETE RESTRICT;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS inventory_item_id INTEGER REFERENCES medicines(id) ON DELETE RESTRICT;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS substituted_inventory_item_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS substitution_approved BOOLEAN NOT NULL DEFAULT FALSE;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS quantity INTEGER;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10,2);
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS total_price NUMERIC(10,2);
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_cart_items_cart_id
+      ON cart_items (cart_id)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_patient_created
+      ON orders (patient_id, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_pharmacy_status_created
+      ON orders (pharmacy_id, status, created_at DESC)
+    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_order_items_order_id
+	      ON order_items (order_id)
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_orders_prescription_id
+	      ON orders (prescription_id)
+	      WHERE prescription_id IS NOT NULL
+	    `);
+
+	    await client.query(`
+	      CREATE TABLE IF NOT EXISTS push_tokens (
+	        id BIGSERIAL PRIMARY KEY,
+	        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	        role TEXT,
+	        expo_push_token TEXT NOT NULL,
+	        device_platform TEXT,
+	        device_name TEXT,
+	        device_model TEXT,
+	        app_version TEXT,
+	        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	        UNIQUE (user_id, expo_push_token)
+	      )
+	    `);
+
+	    await client.query(`
+	      DO $$
+	      BEGIN
+	        IF to_regclass('public.push_tokens') IS NOT NULL THEN
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS role TEXT;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS expo_push_token TEXT;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS device_platform TEXT;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS device_name TEXT;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS device_model TEXT;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS app_version TEXT;
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+	          ALTER TABLE push_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+	        END IF;
+	      END $$;
+	    `);
+
+	    await client.query(`
+	      CREATE TABLE IF NOT EXISTS notifications (
+	        id BIGSERIAL PRIMARY KEY,
+	        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	        title TEXT NOT NULL,
+	        body TEXT NOT NULL,
+	        type TEXT NOT NULL,
+	        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+	        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+	        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+	        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+	      )
+	    `);
+
+	    await client.query(`
+	      DO $$
+	      BEGIN
+	        IF to_regclass('public.notifications') IS NOT NULL THEN
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS title TEXT;
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS body TEXT;
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS type TEXT;
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN NOT NULL DEFAULT FALSE;
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+	          ALTER TABLE notifications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+	        END IF;
+	      END $$;
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_push_tokens_user_id
+	      ON push_tokens (user_id, updated_at DESC)
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+	      ON notifications (user_id, created_at DESC)
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+	      ON notifications (user_id, is_read, created_at DESC)
+	    `);
+
+	    await client.query(`
+	      CREATE TABLE IF NOT EXISTS activity_logs (
+	        id BIGSERIAL PRIMARY KEY,
+	        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+	        order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE,
+	        prescription_id UUID REFERENCES prescriptions(id) ON DELETE CASCADE,
+	        queue_id INTEGER REFERENCES queues(id) ON DELETE CASCADE,
+	        type TEXT NOT NULL,
+	        title TEXT NOT NULL,
+	        description TEXT,
+	        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+	        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+	      )
+	    `);
+
+	    await client.query(`
+	      DO $$
+	      BEGIN
+	        IF to_regclass('public.activity_logs') IS NOT NULL THEN
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS prescription_id UUID REFERENCES prescriptions(id) ON DELETE CASCADE;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS queue_id INTEGER REFERENCES queues(id) ON DELETE CASCADE;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS type TEXT;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS title TEXT;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS description TEXT;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+	          ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+	        END IF;
+	      END $$;
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_activity_logs_user_created
+	      ON activity_logs (user_id, created_at DESC)
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_activity_logs_order_created
+	      ON activity_logs (order_id, created_at ASC)
+	      WHERE order_id IS NOT NULL
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_activity_logs_prescription_created
+	      ON activity_logs (prescription_id, created_at DESC)
+	      WHERE prescription_id IS NOT NULL
+	    `);
+
     // Shift-aware queues (per doctor shift per day).
     await client.query(`
       DO $$
@@ -1768,7 +2194,10 @@ export const initDb = async () => {
             ADD COLUMN IF NOT EXISTS medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE,
             ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES doctor_availability(id) ON DELETE SET NULL,
             ADD COLUMN IF NOT EXISTS schedule_id INTEGER REFERENCES medical_center_doctor_schedule(id) ON DELETE SET NULL,
-            ADD COLUMN IF NOT EXISTS shift_date DATE DEFAULT CURRENT_DATE;
+            ADD COLUMN IF NOT EXISTS shift_date DATE DEFAULT CURRENT_DATE,
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS started_at TIMESTAMP,
+            ADD COLUMN IF NOT EXISTS ended_at TIMESTAMP;
 
           IF to_regclass('public.unique_doctor_daily_queue') IS NOT NULL THEN
             DROP INDEX unique_doctor_daily_queue;
@@ -1787,7 +2216,21 @@ export const initDb = async () => {
     await client.query(`
       ALTER TABLE IF EXISTS queue_patients
       ADD COLUMN IF NOT EXISTS medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE,
-      ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES medical_center_doctor_schedule(id) ON DELETE CASCADE;
+      ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES medical_center_doctor_schedule(id) ON DELETE CASCADE,
+      ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP,
+      ADD COLUMN IF NOT EXISTS is_walkin BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'normal';
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_queue_patients_queue_token
+      ON queue_patients (queue_id, token_number);
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS queue_patients_unique_queue_patient_active
+      ON queue_patients (queue_id, patient_id)
+      WHERE patient_id IS NOT NULL AND status IN ('WAITING', 'WITH_DOCTOR');
     `);
 
     await client.query(`
@@ -1881,16 +2324,12 @@ export const initDb = async () => {
   } catch (err) {
     try {
       await client.query("ROLLBACK");
-    } catch (rollbackError) {
-      markClientBroken(client as unknown as GuardedPoolClient, rollbackError as DbError);
-    }
+    } catch {}
     console.error("❌ DB initialization failed:", err);
     throw err;
   } finally {
     client.release();
   }
-
-  startPoolKeepAlive();
 };
 
 export default pool;

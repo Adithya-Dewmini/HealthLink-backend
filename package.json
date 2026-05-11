@@ -7,6 +7,7 @@
     "build": "tsc",
     "start": "npm run build && node dist/server.js",
     "dev": "nodemon src/server.ts",
+    "seed:demo": "ts-node src/db/seeds/demoMarketplaceSeed.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -15,6 +16,7 @@
   "license": "ISC",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@types/morgan": "^1.9.10",
     "axios": "^1.15.0",
     "bcrypt": "^6.0.0",
     "bcryptjs": "^3.0.3",
@@ -26,7 +28,10 @@
     "expo-device": "~55.0.10",
     "expo-notifications": "~55.0.13",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.5.1",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.10.1",
     "multer": "^2.1.1",
     "multer-storage-cloudinary": "^4.0.0",
     "node-cron": "^4.2.1",

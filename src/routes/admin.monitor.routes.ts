@@ -11,7 +11,6 @@ import {
 const router = Router();
 
 router.use(authenticateToken, requireRole("admin"));
-
 router.get("/monitor/queues", listAdminMonitorQueuesController);
 router.get("/monitor/sessions", listAdminMonitorSessionsController);
 router.get("/monitor/bookings", getAdminMonitorBookingsController);

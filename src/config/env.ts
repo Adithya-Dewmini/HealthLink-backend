@@ -49,10 +49,15 @@ export const env = {
   appTz: optionalString("APP_TZ") || "Asia/Colombo",
   databaseUrl,
   jwtSecret,
+  cloudinaryName: optionalString("CLOUDINARY_NAME"),
+  cloudinaryKey: optionalString("CLOUDINARY_KEY"),
+  cloudinarySecret: optionalString("CLOUDINARY_SECRET"),
   pgSsl: optionalBoolean("PG_SSL", databaseUrl.includes("sslmode=require")),
   pgConnectTimeoutMs: optionalNumber("PG_CONNECT_TIMEOUT_MS", 30000) ?? 30000,
   pgIdleTimeoutMs: optionalNumber("PG_IDLE_TIMEOUT_MS", 30000) ?? 30000,
+  pgPoolMin: optionalNumber("PG_POOL_MIN", 0) ?? 0,
   pgPoolMax: optionalNumber("PG_POOL_MAX", 10) ?? 10,
+  pgKeepAliveQueryMs: optionalNumber("PG_KEEP_ALIVE_QUERY_MS", 60000) ?? 60000,
   pgQueryRetry: optionalNumber("PG_QUERY_RETRY", 2) ?? 2,
   geminiApiKey: optionalString("GEMINI_API_KEY"),
   smtpHost: optionalString("SMTP_HOST"),
@@ -64,8 +69,16 @@ export const env = {
   smtpFrom: optionalString("SMTP_FROM"),
   appWebUrl: optionalString("APP_WEB_URL"),
   publicAppUrl: optionalString("PUBLIC_APP_URL"),
+  allowedOrigins: (optionalString("ALLOWED_ORIGINS") || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+  rateLimitWindowMs: optionalNumber("RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000) ?? 15 * 60 * 1000,
+  rateLimitMaxRequests: optionalNumber("RATE_LIMIT_MAX_REQUESTS", 500) ?? 500,
+  forecastServiceUrl: optionalString("FORECAST_SERVICE_URL"),
   receptionistSetupUrl: optionalString("RECEPTIONIST_SETUP_URL"),
   mobileAppScheme: optionalString("MOBILE_APP_SCHEME") || "healthlink",
+  queueLateCheckInAction: optionalString("QUEUE_LATE_CHECK_IN_ACTION") || "move_to_end",
 };
 
 export type Env = typeof env;

@@ -49,6 +49,12 @@ export type RegisterRequestBody = {
   medicalCenterPhone?: string;
   medicalCenterEmail?: string;
   medicalCenterId?: string;
+  pharmacyName?: string;
+  pharmacyLocation?: string;
+  pharmacyPhone?: string;
+  pharmacyEmail?: string;
+  verificationDocumentName?: string;
+  specialties?: string[] | string;
 };
 
 export type RegisterMedicalCenterRequestBody = {

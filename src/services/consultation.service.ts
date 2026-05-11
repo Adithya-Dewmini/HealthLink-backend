@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import pool from "../config/db";
 import { env } from "../config/env";
+import { createAuditLogWithClient } from "./audit.service";
 import { io } from "../server";
 import QRCode from "qrcode";
 import jwt from "jsonwebtoken";
@@ -449,6 +450,21 @@ export const completeConsultationRecord = async (consultationId: string, userId:
     if (Array.isArray(meds)) {
       await insertPrescriptionItems(client, prescriptionId, meds);
     }
+
+    await createAuditLogWithClient(client, {
+      actorUserId: userId,
+      actorRole: "doctor",
+      userId,
+      action: "prescription_created",
+      entityType: "prescription",
+      entityId: prescriptionId,
+      metadata: {
+        consultationId: consultation.id,
+        patientId: consultation.patient_id,
+        queueId: consultation.queue_id ?? null,
+        medicineCount: Array.isArray(meds) ? meds.length : 0,
+      },
+    });
 
     if (consultation.queue_id && consultation.patient_id) {
       await client.query(

@@ -4,12 +4,11 @@ import {
   checkActiveUserInCenter,
   requireMedicalCenterAdmin,
 } from "../middleware/medicalCenterScope";
-import { updateDoctorClinicSpecialtyController } from "../controllers/medicalCenterDoctorAssignment.controller";
+import { updateDoctorClinicController } from "../controllers/doctorClinicAdmin.controller";
 
 const router = express.Router();
 
 router.use(authenticateToken, requireMedicalCenterAdmin, checkActiveUserInCenter);
-
-router.patch("/:id", updateDoctorClinicSpecialtyController);
+router.patch("/:id", updateDoctorClinicController);
 
 export default router;

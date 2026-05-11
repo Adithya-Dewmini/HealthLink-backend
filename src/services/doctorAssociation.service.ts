@@ -17,11 +17,16 @@ type DoctorAssignmentRow = {
   doctor_profile_id: number | null;
   name: string | null;
   email: string;
+  profile_image: string | null;
   specialization: string | null;
+  clinic_specialty_id: string | null;
+  clinic_specialty: string | null;
   status: DoctorRelationshipStatus;
   joined_at: string;
   invite_id: string | null;
   invite_status: DoctorInviteStatus | null;
+  is_pinned: boolean;
+  is_hidden: boolean;
 };
 
 type DoctorJoinRequestRow = {
@@ -1112,9 +1117,14 @@ export const listMedicalCenterDoctorsWithInvites = async (medicalCenterId: strin
           d.id AS doctor_profile_id,
           u.name,
           u.email,
+          u.profile_image,
           d.specialization,
+          mcd.clinic_specialty_id::text AS clinic_specialty_id,
+          cs.name AS clinic_specialty,
           mcd.status,
           mcd.created_at AS joined_at,
+          COALESCE(mcd.is_pinned, FALSE) AS is_pinned,
+          COALESCE(mcd.is_hidden, FALSE) AS is_hidden,
           (
             SELECT di.id
             FROM doctor_invites di
@@ -1134,6 +1144,7 @@ export const listMedicalCenterDoctorsWithInvites = async (medicalCenterId: strin
         FROM medical_center_doctors mcd
         JOIN users u ON u.id = mcd.doctor_id
         LEFT JOIN doctors d ON d.user_id = mcd.doctor_id
+        LEFT JOIN clinic_specialties cs ON cs.id = mcd.clinic_specialty_id
         WHERE mcd.medical_center_id = $1
           AND mcd.status != 'REJECTED'
         ORDER BY mcd.created_at DESC
@@ -1169,9 +1180,14 @@ export const listMedicalCenterDoctorsWithInvites = async (medicalCenterId: strin
     invite_id: row.invite_id,
     name: row.name,
     email: row.email,
+    profile_image: row.profile_image,
     specialization: row.specialization,
+    clinic_specialty_id: row.clinic_specialty_id,
+    clinic_specialty: row.clinic_specialty,
     status: row.status,
     joined_at: row.joined_at,
+    is_pinned: row.is_pinned,
+    is_hidden: row.is_hidden,
   }));
 
   const inviteRows = pendingInvitesResult.rows.map((row) => ({
@@ -1181,12 +1197,125 @@ export const listMedicalCenterDoctorsWithInvites = async (medicalCenterId: strin
     invite_id: row.id,
     name: null,
     email: row.email,
+    profile_image: null,
     specialization: null,
+    clinic_specialty_id: null,
+    clinic_specialty: null,
     status: "PENDING" as const,
     joined_at: row.created_at,
+    is_pinned: false,
+    is_hidden: false,
   }));
 
   return [...relationshipRows, ...inviteRows];
+};
+
+export const updateDoctorClinicSpecialty = async (input: {
+  medicalCenterId: string;
+  relationshipId: string;
+  clinicSpecialtyId: string | null;
+}) => {
+  const relationship = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM medical_center_doctors
+      WHERE id = $1
+        AND medical_center_id = $2
+      LIMIT 1
+    `,
+    [input.relationshipId, input.medicalCenterId]
+  );
+
+  if (relationship.rows.length === 0) {
+    throw createStatusError("Doctor relationship not found", 404);
+  }
+
+  if (input.clinicSpecialtyId) {
+    const specialty = await pool.query<{ id: string }>(
+      `
+        SELECT id
+        FROM clinic_specialties
+        WHERE id = $1::uuid
+          AND clinic_id = $2::uuid
+        LIMIT 1
+      `,
+      [input.clinicSpecialtyId, input.medicalCenterId]
+    );
+
+    if (specialty.rows.length === 0) {
+      throw createStatusError("Clinic specialty not found", 404);
+    }
+  }
+
+  const result = await pool.query(
+    `
+      UPDATE medical_center_doctors
+      SET clinic_specialty_id = $1::uuid,
+          updated_at = NOW()
+      WHERE id = $2
+        AND medical_center_id = $3::uuid
+      RETURNING id
+    `,
+    [input.clinicSpecialtyId, input.relationshipId, input.medicalCenterId]
+  );
+
+  return {
+    message: "Doctor specialty updated successfully",
+    relationshipId: result.rows[0]?.id ?? input.relationshipId,
+    clinic_specialty_id: input.clinicSpecialtyId,
+  };
+};
+
+export const updateDoctorRelationshipDisplayFlags = async (input: {
+  medicalCenterId: string;
+  relationshipId: string;
+  pinned?: boolean;
+  hidden?: boolean;
+}) => {
+  const relationship = await pool.query<{ id: string }>(
+    `
+      SELECT id
+      FROM medical_center_doctors
+      WHERE id = $1
+        AND medical_center_id = $2::uuid
+      LIMIT 1
+    `,
+    [input.relationshipId, input.medicalCenterId]
+  );
+
+  if (relationship.rows.length === 0) {
+    throw createStatusError("Doctor relationship not found", 404);
+  }
+
+  const result = await pool.query<{
+    id: string;
+    is_pinned: boolean;
+    is_hidden: boolean;
+  }>(
+    `
+      UPDATE medical_center_doctors
+      SET
+        is_pinned = COALESCE($1::boolean, is_pinned),
+        is_hidden = COALESCE($2::boolean, is_hidden),
+        updated_at = NOW()
+      WHERE id = $3
+        AND medical_center_id = $4::uuid
+      RETURNING id, COALESCE(is_pinned, FALSE) AS is_pinned, COALESCE(is_hidden, FALSE) AS is_hidden
+    `,
+    [
+      typeof input.pinned === "boolean" ? input.pinned : null,
+      typeof input.hidden === "boolean" ? input.hidden : null,
+      input.relationshipId,
+      input.medicalCenterId,
+    ]
+  );
+
+  return {
+    message: "Doctor display settings updated successfully",
+    relationshipId: result.rows[0].id,
+    is_pinned: result.rows[0].is_pinned,
+    is_hidden: result.rows[0].is_hidden,
+  };
 };
 
 export const updateDoctorRelationshipStatus = async (input: {

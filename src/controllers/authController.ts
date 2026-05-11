@@ -5,6 +5,7 @@ import { signAuthToken } from "../utils/security";
 import type { LoginRequestBody, RegisterRequestBody } from "../types/auth";
 
 type HttpError = Error & { message: string };
+type DbError = Error & { code?: string; detail?: string; constraint?: string };
 type TokenUser = {
   id: number;
   email: string;
@@ -26,6 +27,7 @@ const generateToken = (user: TokenUser) => {
 };
 
 const normalizeRole = (role: unknown) => String(role || "").trim().toLowerCase();
+const normalizeEmail = (value: unknown) => String(value || "").trim().toLowerCase();
 
 // ============================
 // REGISTER USER
@@ -62,6 +64,8 @@ export const registerUser = async (req: Request, res: Response) => {
   }
 
   const normalizedRole = normalizeRole(role);
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedCenterEmail = normalizeEmail(medicalCenterEmail || email);
 
   if (normalizedRole === "patient") {
     const patientFieldsPresent =
@@ -124,8 +128,8 @@ export const registerUser = async (req: Request, res: Response) => {
     `);
 
     const existingUser = await client.query(
-      "SELECT 1 FROM users WHERE email = $1",
-      [email]
+      "SELECT 1 FROM users WHERE LOWER(email) = $1",
+      [normalizedEmail]
     );
 
     if (existingUser.rows.length > 0) {
@@ -140,10 +144,10 @@ export const registerUser = async (req: Request, res: Response) => {
     const newUser = await client.query(
       `
         INSERT INTO users (name, email, password, password_hash, is_password_set, role)
-        VALUES ($1, $2, $3, $3, TRUE, $4)
+        VALUES ($1, $2, $3::text, $3::text, TRUE, $4)
         RETURNING id, name, email, role
       `,
-      [name, email, hashedPassword, normalizedRole]
+      [name, normalizedEmail, hashedPassword, normalizedRole]
     );
 
     const createdUser = newUser.rows[0];
@@ -162,15 +166,16 @@ export const registerUser = async (req: Request, res: Response) => {
 
       const centerResult = await client.query(
         `
-          INSERT INTO medical_centers (name, address, phone, email)
-          VALUES ($1, $2, $3, $4)
+          INSERT INTO medical_centers (name, address, phone, email, admin_id)
+          VALUES ($1, $2, $3, $4, $5)
           RETURNING id, name
         `,
         [
           medicalCenterName,
           medicalCenterAddress || null,
           medicalCenterPhone || null,
-          medicalCenterEmail || email,
+          normalizedCenterEmail || normalizedEmail,
+          createdUser.id,
         ]
       );
 
@@ -180,6 +185,17 @@ export const registerUser = async (req: Request, res: Response) => {
         `
           INSERT INTO medical_center_admins (user_id, medical_center_id)
           VALUES ($1, $2)
+          ON CONFLICT (user_id, medical_center_id) DO NOTHING
+        `,
+        [createdUser.id, resolvedMedicalCenterId]
+      );
+
+      await client.query(
+        `
+          INSERT INTO medical_center_users (user_id, medical_center_id, role, status)
+          VALUES ($1, $2, 'medical_center_admin', 'ACTIVE')
+          ON CONFLICT (user_id, medical_center_id, role) DO UPDATE
+          SET status = EXCLUDED.status
         `,
         [createdUser.id, resolvedMedicalCenterId]
       );
@@ -268,7 +284,22 @@ export const registerUser = async (req: Request, res: Response) => {
     });
   } catch (err: unknown) {
     await client.query("ROLLBACK");
-    console.error("Register Error:", (err as HttpError).message);
+    const dbError = err as DbError;
+    console.error("Register Error:", {
+      message: dbError.message,
+      code: dbError.code || null,
+      detail: dbError.detail || null,
+      constraint: dbError.constraint || null,
+    });
+
+    if (dbError.code === "23505") {
+      return res.status(409).json({ message: "Email or medical center record already exists" });
+    }
+
+    if (dbError.code === "23503") {
+      return res.status(400).json({ message: "Medical center registration references invalid data" });
+    }
+
     return res.status(500).json({ message: "Server error" });
   } finally {
     client.release();

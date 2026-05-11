@@ -21,6 +21,9 @@ type DoctorSearchRow = {
   specialization: string | null;
   experience_years: number | null;
   profile_image: string | null;
+  clinic_status: "PENDING" | "ACTIVE" | "REJECTED" | "INACTIVE" | null;
+  clinic_hidden: boolean;
+  relationship_id: string | null;
 };
 type DoctorProfileRow = {
   id: number;
@@ -691,10 +694,16 @@ export const searchDoctorsDirectory = async (input?: {
         u.name,
         d.specialization,
         d.experience_years,
-        u.profile_image
+        u.profile_image,
+        mcd.status AS clinic_status,
+        COALESCE(mcd.is_hidden, FALSE) AS clinic_hidden,
+        mcd.id::text AS relationship_id
       FROM doctors d
       JOIN users u ON u.id = d.user_id
       LEFT JOIN doctor_profile_visibility dpv ON dpv.doctor_id = d.id
+      LEFT JOIN medical_center_doctors mcd
+        ON mcd.doctor_id = d.user_id
+       AND ($6::uuid IS NOT NULL AND mcd.medical_center_id = $6::uuid)
       WHERE LOWER(COALESCE(u.role, '')) = 'doctor'
         AND COALESCE(dpv.visibility, 'PUBLIC') = 'PUBLIC'
         AND (
@@ -710,7 +719,7 @@ export const searchDoctorsDirectory = async (input?: {
         u.name ASC
       LIMIT $3 OFFSET $4
     `,
-    [query, specialization, limit, offset, Boolean(input?.includeEmail)]
+    [query, specialization, limit, offset, Boolean(input?.includeEmail), input?.medicalCenterId ?? null]
   );
 
   return result.rows.map((row) => ({
@@ -719,6 +728,9 @@ export const searchDoctorsDirectory = async (input?: {
     specialization: row.specialization,
     experience_years: row.experience_years,
     profile_image: row.profile_image,
+    clinic_status: row.clinic_status,
+    clinic_hidden: Boolean(row.clinic_hidden),
+    relationship_id: row.relationship_id,
   }));
 };
 

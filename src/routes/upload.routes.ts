@@ -1,6 +1,6 @@
 import express from "express";
-import authMiddleware from "../middleware/authMiddleware";
 import { upload } from "../middleware/upload";
+import authMiddleware from "../middleware/authMiddleware";
 import {
   uploadClinicImages,
   uploadPharmacyImages,

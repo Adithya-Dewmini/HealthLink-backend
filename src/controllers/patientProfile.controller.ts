@@ -5,6 +5,7 @@ import { getPatientProfile, updatePatientProfile } from "../services/patientProf
 type PatientProfileUpdateBody = {
   name?: string;
   email?: string;
+  profile_image?: string;
   phone?: string;
   dob?: string;
   gender?: string;

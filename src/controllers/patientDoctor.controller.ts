@@ -1,6 +1,7 @@
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../types/auth";
 import {
+  getDoctorProfileForPatient,
   getDoctorQueueStatusForPatient,
   joinDoctorQueueForPatient,
   listDoctorAvailabilityForPatient,
@@ -10,6 +11,8 @@ import {
 
 type QueueJoinBody = {
   doctor_id?: number | string;
+  clinic_id?: string;
+  medical_center_id?: string;
 };
 
 type HttpError = Error & { statusCode?: number };
@@ -77,7 +80,13 @@ export const getDoctorQueueStatus = async (req: AuthenticatedRequest, res: Respo
   try {
     const patientId = requirePatientLikeUser(req);
     const { doctorId } = req.params;
-    const status = await getDoctorQueueStatusForPatient(doctorId, patientId);
+    const clinicId =
+      typeof req.query.clinicId === "string"
+        ? req.query.clinicId
+        : typeof req.query.medicalCenterId === "string"
+          ? req.query.medicalCenterId
+          : undefined;
+    const status = await getDoctorQueueStatusForPatient(doctorId, patientId, clinicId);
     return res.json(status);
   } catch (error) {
     console.error("Error fetching queue status:", error);
@@ -91,13 +100,14 @@ export const joinQueue = async (
 ) => {
   try {
     const patientId = requirePatientLikeUser(req);
-    const { doctor_id } = req.body || {};
+    const { doctor_id, clinic_id, medical_center_id } = req.body || {};
 
     if (!doctor_id) {
       return res.status(400).json({ message: "doctor_id is required" });
     }
 
-    const result = await joinDoctorQueueForPatient(doctor_id, patientId, req.user?.role);
+    const clinicId = String(clinic_id || medical_center_id || "").trim() || undefined;
+    const result = await joinDoctorQueueForPatient(doctor_id, patientId, req.user?.role, clinicId);
     return res.json(result);
   } catch (error) {
     console.error("Join queue error:", error);
@@ -112,6 +122,17 @@ export const getDoctors = async (req: AuthenticatedRequest, res: Response) => {
     return res.json(doctors);
   } catch (error) {
     console.error("Error fetching doctors:", error);
+    return handleControllerError(res, error, "Internal server error");
+  }
+};
+
+export const getDoctorProfile = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requirePatientLikeUser(req);
+    const profile = await getDoctorProfileForPatient(String(req.params.doctorId || ""));
+    return res.json(profile);
+  } catch (error) {
+    console.error("Error fetching doctor profile:", error);
     return handleControllerError(res, error, "Internal server error");
   }
 };

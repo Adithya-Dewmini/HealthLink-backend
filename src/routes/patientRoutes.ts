@@ -10,15 +10,23 @@ import {
 import { getMe, updateMe } from "../controllers/patientProfile.controller";
 import {
   getDoctorAvailability,
+  getDoctorProfile,
   getDoctorQueueStatus,
   getDoctorWorkingDays,
   getDoctors,
   joinQueue,
 } from "../controllers/patientDoctor.controller";
 import {
+  getPrescriptionDetail,
   getPrescriptions,
   markPrescriptionSeen,
 } from "../controllers/patientPrescription.controller";
+import {
+  buildPrescriptionCartController,
+  createPrescriptionOrderController,
+} from "../modules/prescriptionCommerce/controller";
+import { getPatientPharmacies } from "../controllers/patientPharmacy.controller";
+import { getMedicalHistory } from "../controllers/patientMedicalHistory.controller";
 import { addPatient, getAllPatients } from "../controllers/patient.controller";
 
 const router = express.Router();
@@ -47,11 +55,23 @@ router.post("/queue/join", authMiddleware, joinQueue);
 // ✅ Patient prescriptions (latest or list)
 router.get("/prescriptions", authMiddleware, getPrescriptions);
 
+// ✅ Patient prescription detail
+router.get("/prescriptions/:id", authMiddleware, getPrescriptionDetail);
+
 // ✅ Mark prescription as seen
 router.patch("/prescriptions/:id/seen", authMiddleware, markPrescriptionSeen);
+router.post("/prescriptions/:id/build-cart", authMiddleware, buildPrescriptionCartController);
+router.post("/prescriptions/:id/create-order", authMiddleware, createPrescriptionOrderController);
+
+// ✅ Patient medical history
+router.get("/medical-history", authMiddleware, getMedicalHistory);
+
+// ✅ Patient pharmacy marketplace
+router.get("/pharmacies", authMiddleware, getPatientPharmacies);
 
 // ✅ Fetch doctors list for patients
 router.get("/doctors", authMiddleware, getDoctors);
+router.get("/doctors/:doctorId", authMiddleware, getDoctorProfile);
 
 // ✅ Fetch patient bookings (upcoming + past)
 router.get("/bookings", authMiddleware, getBookings);

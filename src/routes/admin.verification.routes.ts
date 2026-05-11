@@ -2,21 +2,22 @@ import { Router } from "express";
 import { authenticateToken } from "../middleware/authenticateToken";
 import { requireRole } from "../middleware/requireRole";
 import {
-  addVerificationNoteController,
   approveVerificationController,
+  addVerificationNoteController,
   getVerificationDetailController,
   listVerificationsController,
   rejectVerificationController,
+  suspendVerificationController,
 } from "../controllers/admin.verification.controller";
 
 const router = Router();
 
 router.use(authenticateToken, requireRole("admin"));
-
 router.get("/verifications", listVerificationsController);
-router.get("/verifications/:entityType/:entityId", getVerificationDetailController);
-router.post("/verifications/:entityType/:entityId/approve", approveVerificationController);
-router.post("/verifications/:entityType/:entityId/reject", rejectVerificationController);
-router.post("/verifications/:entityType/:entityId/note", addVerificationNoteController);
+router.get("/verifications/:type/:id", getVerificationDetailController);
+router.post("/verifications/:type/:id/approve", approveVerificationController);
+router.post("/verifications/:type/:id/reject", rejectVerificationController);
+router.post("/verifications/:type/:id/suspend", suspendVerificationController);
+router.post("/verifications/:type/:id/note", addVerificationNoteController);
 
 export default router;

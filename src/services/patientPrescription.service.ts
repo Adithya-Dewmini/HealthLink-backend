@@ -1,4 +1,5 @@
 import pool from "../config/db";
+import { getPrescriptionDetails } from "./prescription.service";
 
 type HttpError = Error & { statusCode?: number };
 
@@ -18,6 +19,7 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
       COALESCE(p.issued_at, c.created_at) AS issued_at,
       p.dispensed_at AS dispensed_at,
       c.created_at,
+      mc.name AS medical_center_name,
       du.name AS doctor_name,
       COALESCE(d.specialization, 'General') AS doctor_specialization,
       COALESCE(
@@ -36,11 +38,12 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
     JOIN consultations c ON c.id = p.consultation_id
     LEFT JOIN users du ON du.id = c.doctor_id
     LEFT JOIN doctors d ON d.user_id = c.doctor_id
+    LEFT JOIN medical_centers mc ON mc.id = COALESCE(p.medical_center_id, c.medical_center_id)
     LEFT JOIN prescription_items pi ON pi.prescription_id = p.id
     WHERE c.patient_id = $1
       AND c.status = 'completed'
     ${latestFilter}
-    GROUP BY p.id, p.qr_code, p.is_seen, p.issued_at, p.dispensed_at, c.created_at, du.name, d.specialization
+    GROUP BY p.id, p.qr_code, p.is_seen, p.issued_at, p.dispensed_at, c.created_at, mc.name, du.name, d.specialization
   `;
 
   const result = latest
@@ -55,6 +58,7 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
       specialization: row.doctor_specialization ?? null,
     },
     createdAt: row.created_at,
+    medical_center_name: row.medical_center_name ?? null,
     issuedAt: row.issued_at ?? row.created_at,
     dispensedAt: row.dispensed_at ?? null,
     status: row.dispensed_at ? "Completed" : "Active",
@@ -65,7 +69,11 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
   return latest ? rows[0] ?? null : rows;
 };
 
-export const markPatientPrescriptionSeen = async (prescriptionId: number, patientId: number) => {
+export const getPatientPrescriptionDetail = async (prescriptionId: string, patientId: number) => {
+  return getPrescriptionDetails(prescriptionId, { id: patientId, role: "patient" });
+};
+
+export const markPatientPrescriptionSeen = async (prescriptionId: string, patientId: number) => {
   const result = await pool.query(
     `
     UPDATE prescriptions p

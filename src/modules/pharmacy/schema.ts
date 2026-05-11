@@ -47,6 +47,7 @@ export const getInventorySchema = async (client: PoolClient) => {
     medicineCol: requireColumn(columns, ["medicine_id"], "inventory medicine"),
     stockCol: requireColumn(columns, ["stock", "stock_quantity", "quantity", "qty"], "inventory stock"),
     priceCol: pickColumn(columns, ["unit_price", "selling_price", "price", "avg_price"]),
+    reservedCol: pickColumn(columns, ["reserved_quantity", "reserved_qty"]),
   };
 };
 
