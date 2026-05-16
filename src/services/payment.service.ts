@@ -215,6 +215,14 @@ const PAYHERE_DEBUG_LOGS_ENABLED =
   process.env.NODE_ENV !== "production" && process.env.NODE_ENV !== "test" && process.env.VITEST !== "true";
 
 const getHostedCheckoutBaseUrl = () => {
+  if (env.publicAppUrl) {
+    return env.publicAppUrl;
+  }
+
+  if (env.appWebUrl) {
+    return env.appWebUrl;
+  }
+
   if (env.payHereNotifyUrl) {
     try {
       return new URL(env.payHereNotifyUrl).origin;
@@ -222,8 +230,7 @@ const getHostedCheckoutBaseUrl = () => {
       // Fall through to the app-level fallbacks.
     }
   }
-
-  return env.publicAppUrl || env.appWebUrl || null;
+  return null;
 };
 
 const escapeHtmlAttribute = (value: string) =>
