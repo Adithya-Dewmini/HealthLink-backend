@@ -1,5 +1,5 @@
-import jwt from "jsonwebtoken";
 import pool from "../config/db";
+import { getPrescriptionQrMetadata } from "./prescription.service";
 
 type HttpError = Error & { statusCode?: number };
 
@@ -27,35 +27,6 @@ const normalizeStatusFilter = (value?: string) => {
     return "dispensed";
   }
   return null;
-};
-
-const getQrMetadata = (qrCode?: string | null) => {
-  if (!qrCode) {
-    return {
-      qrStatus: "unavailable" as const,
-      expiresAt: null as string | null,
-    };
-  }
-
-  try {
-    const decoded = jwt.decode(qrCode) as { exp?: number } | null;
-    const expiresAt =
-      typeof decoded?.exp === "number" ? new Date(decoded.exp * 1000).toISOString() : null;
-
-    if (!expiresAt) {
-      return { qrStatus: "active" as const, expiresAt: null };
-    }
-
-    return {
-      qrStatus: new Date(expiresAt).getTime() <= Date.now() ? ("expired" as const) : ("active" as const),
-      expiresAt,
-    };
-  } catch {
-    return {
-      qrStatus: "unknown" as const,
-      expiresAt: null,
-    };
-  }
 };
 
 export const listDoctorPrescriptions = async (
@@ -152,7 +123,7 @@ export const listDoctorPrescriptions = async (
   );
 
   return result.rows.map((row) => {
-    const qrMeta = getQrMetadata(row.qr_code);
+    const qrMeta = getPrescriptionQrMetadata(row.qr_code);
     return {
       id: String(row.id),
       consultationId: row.consultation_id ? String(row.consultation_id) : null,
@@ -261,7 +232,7 @@ export const getDoctorPrescriptionDetail = async (
     [prescriptionId]
   );
 
-  const qrMeta = getQrMetadata(row.qr_code);
+  const qrMeta = getPrescriptionQrMetadata(row.qr_code);
 
   return {
     id: String(row.id),

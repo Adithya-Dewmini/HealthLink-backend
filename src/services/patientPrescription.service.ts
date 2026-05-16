@@ -1,5 +1,5 @@
 import pool from "../config/db";
-import { getPrescriptionDetails } from "./prescription.service";
+import { ensurePrescriptionQrToken, getPrescriptionDetails } from "./prescription.service";
 
 type HttpError = Error & { statusCode?: number };
 
@@ -65,6 +65,15 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
     medicines: Array.isArray(row.medicines) ? row.medicines : [],
     isSeen: row.is_seen ?? false,
   }));
+
+  if (latest && rows[0]?.id) {
+    const qrState = await ensurePrescriptionQrToken(pool, {
+      prescriptionId: rows[0].id,
+      qrCode: rows[0].qrToken ?? null,
+      isDispensed: Boolean(rows[0].dispensedAt),
+    });
+    rows[0].qrToken = qrState.qrToken;
+  }
 
   return latest ? rows[0] ?? null : rows;
 };

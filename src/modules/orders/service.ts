@@ -17,6 +17,7 @@ import type {
   ReviewOrderInput,
   UpdateOrderStatusInput,
 } from "./types";
+import { assertOrderReadyForPharmacyProcessing } from "./paymentGuard";
 
 type DbRecord = Record<string, any>;
 type CheckoutProductRow = {
@@ -370,15 +371,6 @@ const getPharmacyOrder = async (client: PoolClient, orderId: number, pharmacyId:
   }
 
   return { row, summary: await buildOrderSummary(client, row) };
-};
-
-const assertOrderReadyForPharmacyProcessing = (row: DbRecord) => {
-  const paymentMethod = String(row.payment_method || "").toLowerCase();
-  const paymentStatus = String(row.payment_status || "").toLowerCase();
-
-  if (paymentMethod === "online" && paymentStatus !== "paid") {
-    throw new HttpError(409, "Online payment is still pending for this order");
-  }
 };
 
 export const getOrderSummaryById = async (orderId: number) =>

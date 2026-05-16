@@ -25,6 +25,7 @@ type GatewayOrderRecord = {
   order_code: string | null;
   notes: string | null;
   created_at: string | null;
+  updated_at: string | null;
   patient_name: string | null;
   patient_email: string | null;
   patient_phone: string | null;
@@ -59,11 +60,18 @@ export type PaymentStatusSummary = {
   paidAt: string | null;
   amount: number;
   currency: string;
+  gatewayPaymentId: string | null;
+  invoiceId: number | null;
+  invoiceNo: string | null;
+  updatedAt: string | null;
+  message: string;
   payment: {
     id: number;
     gateway: string;
     gatewayPaymentId: string | null;
     gatewayOrderId: string | null;
+    amount: number;
+    currency: string;
     status: PaymentStatus;
     method: string | null;
     cardNoMasked: string | null;
@@ -142,7 +150,17 @@ const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2))
 
 const formatGatewayAmount = (value: number) => normalizeMoney(value).toFixed(2);
 
-const getHostedCheckoutBaseUrl = () => env.publicAppUrl || env.appWebUrl || null;
+const getHostedCheckoutBaseUrl = () => {
+  if (env.payHereNotifyUrl) {
+    try {
+      return new URL(env.payHereNotifyUrl).origin;
+    } catch {
+      // Fall through to the app-level fallbacks.
+    }
+  }
+
+  return env.publicAppUrl || env.appWebUrl || null;
+};
 
 const escapeHtmlAttribute = (value: string) =>
   value
@@ -172,6 +190,36 @@ const getPaymentGatewayConfig = () => {
     cancelUrl: env.payHereCancelUrl,
     notifyUrl: env.payHereNotifyUrl,
   };
+};
+
+const buildPaymentStatusMessage = (input: {
+  paymentMethod: string | null;
+  paymentStatus: PaymentStatus | null;
+  invoiceNo?: string | null;
+}) => {
+  if (input.paymentMethod !== "online") {
+    return "Cash payment will be completed with the pharmacy.";
+  }
+
+  if (input.paymentStatus === "paid") {
+    return input.invoiceNo
+      ? `Payment successful. Invoice ${input.invoiceNo} is ready.`
+      : "Payment successful.";
+  }
+
+  if (input.paymentStatus === "failed") {
+    return "Payment failed. You can start a new checkout attempt.";
+  }
+
+  if (input.paymentStatus === "cancelled") {
+    return "Payment cancelled.";
+  }
+
+  if (input.paymentStatus === "refunded") {
+    return "Payment refunded.";
+  }
+
+  return "Payment confirmation is still pending.";
 };
 
 const withTransaction = async <T>(callback: (client: PoolClient) => Promise<T>) => {
@@ -341,6 +389,7 @@ const getGatewayOrderRecord = async (client: PoolClient, orderId: number) => {
         o.order_code,
         o.notes,
         o.created_at,
+        o.updated_at,
         u.name AS patient_name,
         u.email AS patient_email,
         pp.phone AS patient_phone,
@@ -527,7 +576,7 @@ export const createCheckoutSession = async (
     const gatewayConfig = getPaymentGatewayConfig();
     const hostedBaseUrl = getHostedCheckoutBaseUrl();
     if (!hostedBaseUrl) {
-      throw new HttpError(503, "Public app URL is not configured for hosted checkout");
+      throw new HttpError(503, "Payment gateway is not configured");
     }
 
     const order = await getGatewayOrderRecord(client, orderId);
@@ -542,43 +591,81 @@ export const createCheckoutSession = async (
     if (String(order.payment_status || "").toLowerCase() === "paid" || order.paid_at) {
       throw new HttpError(409, "This order has already been paid");
     }
+    if (normalizeMoney(order.total) <= 0) {
+      throw new HttpError(409, "This order is not payable");
+    }
 
-    await client.query(
+    const orderCurrency = String(order.currency || "LKR").toUpperCase();
+    if (orderCurrency !== "LKR") {
+      throw new HttpError(409, "This order is not payable");
+    }
+
+    const pendingPaymentsResult = await client.query(
       `
-        UPDATE payments
-        SET status = 'cancelled',
-            status_message = COALESCE(status_message, 'Superseded by a new checkout attempt'),
-            updated_at = NOW()
+        SELECT id, gateway_order_id, amount, currency
+        FROM payments
         WHERE order_id = $1
           AND status = 'pending'
+        ORDER BY created_at DESC, id DESC
+        FOR UPDATE
       `,
       [orderId]
     );
 
-    const gatewayOrderId = `HLPAY-${orderId}-${Date.now()}`;
-    const paymentResult = await client.query(
-      `
-        INSERT INTO payments (
-          order_id,
-          patient_id,
-          pharmacy_id,
-          gateway,
-          gateway_order_id,
-          amount,
-          currency,
-          status,
-          created_at,
-          updated_at
-        )
-        VALUES ($1, $2, $3, 'payhere', $4, $5, $6, 'pending', NOW(), NOW())
-        RETURNING id
-      `,
-      [orderId, patientId, order.pharmacy_id, gatewayOrderId, normalizeMoney(order.total), order.currency || "LKR"]
-    );
+    const [activePendingPayment, ...stalePendingPayments] = pendingPaymentsResult.rows;
+    if (stalePendingPayments.length) {
+      await client.query(
+        `
+          UPDATE payments
+          SET status = 'cancelled',
+              status_message = COALESCE(status_message, 'Superseded by a newer checkout session'),
+              updated_at = NOW()
+          WHERE id = ANY($1::bigint[])
+        `,
+        [stalePendingPayments.map((payment) => Number(payment.id))]
+      );
+    }
 
-    const paymentId = Number(paymentResult.rows[0]?.id);
-    if (!paymentId) {
-      throw new HttpError(500, "Failed to create payment record");
+    let paymentId = activePendingPayment ? Number(activePendingPayment.id) : 0;
+    let gatewayOrderId = activePendingPayment ? String(activePendingPayment.gateway_order_id) : "";
+
+    if (!paymentId || !gatewayOrderId) {
+      gatewayOrderId = `HLPAY-${orderId}-${Date.now()}`;
+      const paymentResult = await client.query(
+        `
+          INSERT INTO payments (
+            order_id,
+            patient_id,
+            pharmacy_id,
+            gateway,
+            gateway_order_id,
+            amount,
+            currency,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, 'payhere', $4, $5, $6, 'pending', NOW(), NOW())
+          RETURNING id
+        `,
+        [orderId, patientId, order.pharmacy_id, gatewayOrderId, normalizeMoney(order.total), orderCurrency]
+      );
+
+      paymentId = Number(paymentResult.rows[0]?.id);
+      if (!paymentId) {
+        throw new HttpError(500, "Failed to create payment record");
+      }
+    } else {
+      await client.query(
+        `
+          UPDATE payments
+          SET amount = $2,
+              currency = $3,
+              updated_at = NOW()
+          WHERE id = $1
+        `,
+        [paymentId, normalizeMoney(order.total), orderCurrency]
+      );
     }
 
     await client.query(
@@ -597,7 +684,7 @@ export const createCheckoutSession = async (
       id: paymentId,
       gatewayOrderId,
       amount: normalizeMoney(order.total),
-      currency: order.currency || "LKR",
+      currency: orderCurrency,
     });
     const hostedToken = buildHostedCheckoutToken(paymentId, orderId);
 
@@ -804,21 +891,35 @@ export const getPaymentStatus = async (
 
     const paymentRow = await loadLatestPaymentRow(client, orderId);
     const invoice = await loadInvoiceSummary(client, orderId);
+    const paymentMethod = order.payment_method ?? null;
+    const paymentStatus = (order.payment_status ?? paymentRow?.status ?? null) as PaymentStatus | null;
+    const updatedAtSource = paymentRow?.updated_at ?? order.updated_at ?? order.paid_at ?? order.created_at ?? null;
 
     return {
       orderId,
       orderStatus: order.status,
-      paymentMethod: order.payment_method,
-      paymentStatus: (order.payment_status ?? paymentRow?.status ?? null) as PaymentStatus | null,
+      paymentMethod,
+      paymentStatus,
       paidAt: order.paid_at ? new Date(order.paid_at).toISOString() : null,
       amount: normalizeMoney(order.total),
       currency: order.currency || "LKR",
+      gatewayPaymentId: paymentRow?.gateway_payment_id ?? null,
+      invoiceId: invoice?.id ?? null,
+      invoiceNo: invoice?.invoiceNo ?? null,
+      updatedAt: updatedAtSource ? new Date(updatedAtSource).toISOString() : null,
+      message: buildPaymentStatusMessage({
+        paymentMethod,
+        paymentStatus,
+        invoiceNo: invoice?.invoiceNo ?? null,
+      }),
       payment: paymentRow
         ? {
             id: Number(paymentRow.id),
             gateway: paymentRow.gateway,
             gatewayPaymentId: paymentRow.gateway_payment_id ?? null,
             gatewayOrderId: paymentRow.gateway_order_id ?? null,
+            amount: normalizeMoney(paymentRow.amount),
+            currency: paymentRow.currency ?? order.currency ?? "LKR",
             status: paymentRow.status,
             method: paymentRow.method ?? null,
             cardNoMasked: paymentRow.card_no_masked ?? null,
