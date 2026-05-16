@@ -284,6 +284,9 @@ const validateHostedCheckoutFields = (
 ) => {
   const processMerchantId = String(process.env.PAYHERE_MERCHANT_ID || "").trim();
   const normalizedMerchantSecret = String(merchantSecret || "").trim();
+  const expectedReturnUrl = String(process.env.PAYHERE_RETURN_URL || env.payHereReturnUrl || "").trim();
+  const expectedCancelUrl = String(process.env.PAYHERE_CANCEL_URL || env.payHereCancelUrl || "").trim();
+  const expectedNotifyUrl = String(process.env.PAYHERE_NOTIFY_URL || env.payHereNotifyUrl || "").trim();
   const hash = String(fields.hash || "");
   const issues: string[] = [];
 
@@ -302,14 +305,14 @@ const validateHostedCheckoutFields = (
   if (fields.currency !== "LKR") {
     issues.push("currency must be LKR");
   }
-  if (!String(fields.return_url || "").includes("www.adithyadewmini.com")) {
-    issues.push("return_url must contain www.adithyadewmini.com");
+  if (!expectedReturnUrl || fields.return_url !== expectedReturnUrl) {
+    issues.push("return_url must match PAYHERE_RETURN_URL");
   }
-  if (!String(fields.cancel_url || "").includes("www.adithyadewmini.com")) {
-    issues.push("cancel_url must contain www.adithyadewmini.com");
+  if (!expectedCancelUrl || fields.cancel_url !== expectedCancelUrl) {
+    issues.push("cancel_url must match PAYHERE_CANCEL_URL");
   }
-  if (!String(fields.notify_url || "").includes("healthlink-backend-5a75.onrender.com")) {
-    issues.push("notify_url must contain healthlink-backend-5a75.onrender.com");
+  if (!expectedNotifyUrl || fields.notify_url !== expectedNotifyUrl) {
+    issues.push("notify_url must match PAYHERE_NOTIFY_URL");
   }
   if (isPlaceholderConfigValue(fields.return_url) || isPlaceholderConfigValue(fields.cancel_url) || isPlaceholderConfigValue(fields.notify_url)) {
     issues.push("placeholder URL detected");
