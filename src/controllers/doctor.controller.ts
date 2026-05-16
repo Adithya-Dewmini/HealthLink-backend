@@ -170,7 +170,13 @@ export const getDashboard = async (req: AuthenticatedRequest, res: Response) => 
 export const getQueueDashboard = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = getDoctorUserId(req);
-    const data = await getDoctorQueueDashboardData(userId);
+    const scheduleId =
+      typeof req.query.scheduleId === "string"
+        ? req.query.scheduleId
+        : typeof req.query.sessionId === "string"
+          ? req.query.sessionId
+          : undefined;
+    const data = await getDoctorQueueDashboardData(userId, { scheduleId });
     return res.json(data);
   } catch (error) {
     console.error("Dashboard error:", error);

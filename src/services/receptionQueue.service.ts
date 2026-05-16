@@ -16,6 +16,7 @@ import {
   toReceptionistPermissionContract,
 } from "./receptionistPermissions.service";
 import { emitClinicPublicQueueUpdate } from "./clinicRealtime.service";
+import { SOCKET_EVENTS, logRealtimeEmit } from "./realtime.service";
 import { bookUnifiedSession } from "./unifiedSession.service";
 
 const APP_TZ = env.appTz;
@@ -84,6 +85,7 @@ type QueueDetailPatientRow = {
   patient_profile_image?: string | null;
   phone: string | null;
   booking_time: string | null;
+  is_walkin: boolean | null;
   started_at: string | null;
   completed_at: string | null;
   missed_at: string | null;
@@ -186,16 +188,20 @@ const emitQueueUpdate = (payload: {
 }) => {
   const eventPayload = { ...payload, emittedAt: new Date().toISOString() };
   if (payload.doctorId) {
-    io.to(doctorRoom(payload.doctorId)).emit("queue:update", eventPayload);
-    io.to(legacyDoctorRoom(payload.doctorId)).emit("queue:update", eventPayload);
-    io.to(doctorRoom(payload.doctorId)).emit("queueUpdated", eventPayload);
-    io.to(legacyDoctorRoom(payload.doctorId)).emit("queueUpdated", eventPayload);
+    for (const room of [doctorRoom(payload.doctorId), legacyDoctorRoom(payload.doctorId)]) {
+      io.to(room).emit(SOCKET_EVENTS.queueUpdate, eventPayload);
+      logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, eventPayload);
+    }
   }
   if (payload.patientId) {
-    io.to(patientRoom(payload.patientId)).emit("queue:update", eventPayload);
+    const room = patientRoom(payload.patientId);
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, eventPayload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, eventPayload);
   }
   if (payload.medicalCenterId) {
-    io.to(`center_${payload.medicalCenterId}`).emit("queue:update", eventPayload);
+    const room = `center_${payload.medicalCenterId}`;
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, eventPayload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, eventPayload);
     emitClinicPublicQueueUpdate({
       clinicId: payload.medicalCenterId,
       doctorId: payload.doctorId ?? null,
@@ -204,8 +210,8 @@ const emitQueueUpdate = (payload: {
       type: payload.type,
     });
   }
-  io.to(receptionRoom).emit("queue:update", eventPayload);
-  io.to(receptionRoom).emit("queueUpdated", eventPayload);
+  io.to(receptionRoom).emit(SOCKET_EVENTS.queueUpdate, eventPayload);
+  logRealtimeEmit(SOCKET_EVENTS.queueUpdate, receptionRoom, eventPayload);
 };
 
 const emitPatientCalled = (payload: {
@@ -908,6 +914,7 @@ const loadQueuePatientsByQueueId = async (queueId: number) => {
       u.profile_image AS patient_profile_image,
       pp.phone,
       b.time::text AS booking_time,
+      qp.is_walkin,
       qp.started_at::text AS started_at,
       qp.completed_at::text AS completed_at,
       qp.missed_at::text AS missed_at
@@ -932,6 +939,7 @@ const loadQueuePatientsByQueueId = async (queueId: number) => {
     profileImage: row.patient_profile_image || null,
     phone: row.phone,
     bookingTime: row.booking_time ? String(row.booking_time).slice(0, 5) : null,
+    isWalkIn: Boolean(row.is_walkin),
     startedAt: row.started_at,
     completedAt: row.completed_at,
     missedAt: row.missed_at,
@@ -1760,11 +1768,12 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
     });
 
     if (!queue || !["LIVE", "PAUSED"].includes(normalizeQueueStatus(queue.status))) {
-      return mutationResponse("Patient checked in. Queue has not started yet.", {
+      return mutationResponse("Patient checked in. Start the queue to place them in the live queue.", {
         bookingId: booking.id,
         status: "checked_in",
         lateMinutes,
         gracePeriodMinutes: threshold,
+        sessionId: booking.session_id,
         queue: null,
       });
     }
@@ -1808,6 +1817,7 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
         {
         bookingId: booking.id,
         queueId: queue.id,
+        sessionId: booking.session_id,
         position: patient?.token_number ?? existing.rows[0].token_number,
         patient,
         doctorId: queue.doctor_id,
@@ -1835,6 +1845,7 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
       {
         bookingId: booking.id,
         queueId: queue.id,
+        sessionId: booking.session_id,
         position: patient?.token_number ?? inserted.token_number,
         patient,
         doctorId: queue.doctor_id,
@@ -1846,6 +1857,7 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
 
   const data = eventPayload.data as {
     queueId?: number;
+    sessionId?: number | null;
     patient?: QueuePatientSummaryRow | null;
     doctorId?: number;
     missedQueueRows?: Array<{
@@ -1868,6 +1880,7 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
     emitQueueUpdate({
       type: "PATIENT_CHECKED_IN",
       queueId: data.queueId,
+      sessionId: data.sessionId,
       patientId: data.patient.patient_id,
       doctorId: data.doctorId,
       medicalCenterId,
@@ -2137,6 +2150,7 @@ export const sendReceptionVisitToQueue = async (medicalCenterId: string, booking
       return mutationResponse("Patient is already linked to this queue", {
         bookingId: booking.id,
         queueId: queue.id,
+        sessionId: booking.session_id,
         position: patient?.token_number ?? existing.rows[0].token_number,
         patient,
         doctorId: queue.doctor_id,
@@ -2168,6 +2182,7 @@ export const sendReceptionVisitToQueue = async (medicalCenterId: string, booking
     return mutationResponse("Patient sent to queue successfully", {
       bookingId: booking.id,
       queueId: queue.id,
+      sessionId: booking.session_id,
       position: patient?.token_number ?? inserted.token_number,
       patient,
       doctorId: queue.doctor_id,
@@ -2177,6 +2192,7 @@ export const sendReceptionVisitToQueue = async (medicalCenterId: string, booking
   emitQueueUpdate({
     type: "PATIENT_ADDED",
     queueId: result.data.queueId,
+    sessionId: result.data.sessionId,
     patientId: result.data.patient?.patient_id,
     doctorId: result.data.doctorId,
     medicalCenterId,
@@ -2769,7 +2785,10 @@ export const startReceptionQueue = async (input: {
           AND b.medical_center_id = $4
           AND b.session_id = $3
           AND b.date = ${APP_DATE_SQL}
-          AND COALESCE(UPPER(b.status), '${BOOKING_STATUS.BOOKED}') = '${BOOKING_STATUS.BOOKED}'
+          AND COALESCE(UPPER(b.status), '${BOOKING_STATUS.BOOKED}') IN (
+            '${BOOKING_STATUS.BOOKED}',
+            '${BOOKING_STATUS.CONFIRMED}'
+          )
       ),
       inserted AS (
         INSERT INTO queue_patients (

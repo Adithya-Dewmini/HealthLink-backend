@@ -77,7 +77,7 @@ type ReceptionRoutineBody = {
   maxPatients?: number | string;
   routine?: Array<{
     dayOfWeek?: number | string;
-    shifts?: Array<{ start?: string; end?: string }>;
+    shifts?: Array<{ start?: string; end?: string; roomNumber?: string | null }>;
   }>;
 };
 
@@ -816,6 +816,10 @@ export const saveReceptionSessionDoctorRoutine = async (
               ? day.shifts.map((shift) => ({
                   start: String(shift?.start || ""),
                   end: String(shift?.end || ""),
+                  roomNumber:
+                    typeof shift?.roomNumber === "string" && shift.roomNumber.trim()
+                      ? shift.roomNumber.trim()
+                      : null,
                 }))
               : [],
           }))

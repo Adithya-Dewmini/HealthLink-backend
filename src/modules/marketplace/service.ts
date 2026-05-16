@@ -11,8 +11,22 @@ import type {
 } from "./types";
 
 type DbRecord = Record<string, any>;
+type MarketplaceSearchInput =
+  | string
+  | {
+      search?: string;
+      query?: string;
+      category?: string;
+      limit?: number;
+      terms?: string[];
+    };
 
 const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2));
+const normalizeSearchTerm = (value: unknown) =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
 
 const withTransaction = async <T>(callback: (client: PoolClient) => Promise<T>) => {
   const client = await pool.connect();
@@ -283,8 +297,36 @@ export const getMarketplaceStoreByPharmacyId = async (
     };
   });
 
-export const searchMarketplaceProducts = async (query: string) =>
+export const searchMarketplaceProducts = async (input: MarketplaceSearchInput) =>
   withTransaction(async (client) => {
+    const rawInput =
+      typeof input === "string"
+        ? { query: input, search: input }
+        : {
+            query: input.query,
+            search: input.search ?? input.query,
+            category: input.category,
+            limit: input.limit,
+            terms: input.terms,
+          };
+
+    const searchTerms = Array.from(
+      new Set(
+        [
+          rawInput.search,
+          rawInput.query,
+          rawInput.category,
+          ...(Array.isArray(rawInput.terms) ? rawInput.terms : []),
+        ]
+          .map(normalizeSearchTerm)
+          .filter((term) => term.length > 0)
+      )
+    );
+
+    if (!searchTerms.length) {
+      return { items: [] };
+    }
+
     const approvedPharmacies = await client.query<{ id: number }>(
       `
         SELECT id
@@ -299,6 +341,78 @@ export const searchMarketplaceProducts = async (query: string) =>
     }
 
     const inventory = await getInventorySchema(client);
+    const params: Array<string | number> = [];
+    const searchClauses: string[] = [];
+    const scoreClauses: string[] = [];
+
+    for (const term of searchTerms) {
+      params.push(term);
+      const exactIndex = params.length;
+      searchClauses.push(`
+        LOWER(mp.name) = $${exactIndex}
+        OR LOWER(COALESCE(mp.generic_name, '')) = $${exactIndex}
+        OR LOWER(COALESCE(mp.brand, '')) = $${exactIndex}
+        OR LOWER(COALESCE(mp.category, '')) = $${exactIndex}
+      `);
+      scoreClauses.push(`
+        CASE
+          WHEN LOWER(mp.name) = $${exactIndex}
+            OR LOWER(COALESCE(mp.generic_name, '')) = $${exactIndex}
+            OR LOWER(COALESCE(mp.brand, '')) = $${exactIndex}
+          THEN 160
+          WHEN LOWER(COALESCE(mp.category, '')) = $${exactIndex}
+          THEN 120
+          ELSE 0
+        END
+      `);
+
+      params.push(`${term}%`);
+      const prefixIndex = params.length;
+      searchClauses.push(`
+        LOWER(mp.name) LIKE $${prefixIndex}
+        OR LOWER(COALESCE(mp.generic_name, '')) LIKE $${prefixIndex}
+        OR LOWER(COALESCE(mp.brand, '')) LIKE $${prefixIndex}
+        OR LOWER(COALESCE(mp.category, '')) LIKE $${prefixIndex}
+      `);
+      scoreClauses.push(`
+        CASE
+          WHEN LOWER(mp.name) LIKE $${prefixIndex}
+            OR LOWER(COALESCE(mp.generic_name, '')) LIKE $${prefixIndex}
+            OR LOWER(COALESCE(mp.brand, '')) LIKE $${prefixIndex}
+          THEN 90
+          WHEN LOWER(COALESCE(mp.category, '')) LIKE $${prefixIndex}
+          THEN 70
+          ELSE 0
+        END
+      `);
+
+      if (term.length >= 3) {
+        params.push(`%${term}%`);
+        const partialIndex = params.length;
+        searchClauses.push(`
+          LOWER(mp.name) LIKE $${partialIndex}
+          OR LOWER(COALESCE(mp.generic_name, '')) LIKE $${partialIndex}
+          OR LOWER(COALESCE(mp.brand, '')) LIKE $${partialIndex}
+          OR LOWER(COALESCE(mp.description, '')) LIKE $${partialIndex}
+          OR LOWER(COALESCE(mp.category, '')) LIKE $${partialIndex}
+        `);
+        scoreClauses.push(`
+          CASE
+            WHEN LOWER(mp.name) LIKE $${partialIndex}
+              OR LOWER(COALESCE(mp.generic_name, '')) LIKE $${partialIndex}
+              OR LOWER(COALESCE(mp.brand, '')) LIKE $${partialIndex}
+            THEN 55
+            WHEN LOWER(COALESCE(mp.category, '')) LIKE $${partialIndex}
+              OR LOWER(COALESCE(mp.description, '')) LIKE $${partialIndex}
+            THEN 35
+            ELSE 0
+          END
+        `);
+      }
+    }
+
+    params.push(Math.max(1, Math.min(Number(rawInput.limit ?? 50) || 50, 50)));
+    const limitIndex = params.length;
     const result = await client.query(
       `
         SELECT
@@ -317,7 +431,8 @@ export const searchMarketplaceProducts = async (query: string) =>
           mp.is_featured,
           mp.is_active,
           COALESCE(inv.${quoteIdent(inventory.stockCol)}, 0)::int AS stock_quantity,
-          p.name AS pharmacy_name
+          p.name AS pharmacy_name,
+          (${scoreClauses.join(" + ")}) AS match_score
         FROM marketplace_products mp
         JOIN pharmacies p ON p.id = mp.pharmacy_id
         JOIN inventory inv
@@ -326,15 +441,15 @@ export const searchMarketplaceProducts = async (query: string) =>
         WHERE mp.is_active = TRUE
           AND LOWER(COALESCE(p.verification_status, 'pending')) = 'approved'
           AND LOWER(COALESCE(p.status, 'active')) NOT IN ('inactive', 'disabled', 'closed', 'suspended')
-          AND (
-            LOWER(mp.name) LIKE $1
-            OR LOWER(COALESCE(mp.generic_name, '')) LIKE $1
-            OR LOWER(COALESCE(mp.brand, '')) LIKE $1
-          )
-        ORDER BY mp.is_featured DESC, COALESCE(inv.${quoteIdent(inventory.stockCol)}, 0) DESC, mp.created_at DESC
-        LIMIT 50
+          AND (${searchClauses.join(" OR ")})
+        ORDER BY
+          match_score DESC,
+          mp.is_featured DESC,
+          COALESCE(inv.${quoteIdent(inventory.stockCol)}, 0) DESC,
+          mp.created_at DESC
+        LIMIT $${limitIndex}
       `,
-      [`%${query.trim().toLowerCase()}%`]
+      params
     );
 
     return {

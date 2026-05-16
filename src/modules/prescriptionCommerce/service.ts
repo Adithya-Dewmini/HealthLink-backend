@@ -1,8 +1,9 @@
 import pool from "../../config/db";
 import type { PoolClient } from "pg";
 import { HttpError } from "../pharmacy/errors";
+import { fetchPharmacyProfileByUserId } from "../pharmacy/service";
 import { getInventorySchema, quoteIdent } from "../pharmacy/schema";
-import type { OrderStatus } from "../orders/types";
+import type { DeliveryAddress, OrderStatus, PaymentMethod } from "../orders/types";
 import type {
   CreatePrescriptionOrderInput,
   PrescriptionBuildCartResponse,
@@ -13,6 +14,43 @@ import type {
 type DbRecord = Record<string, any>;
 
 const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2));
+
+const normalizeLookupName = (value: unknown) =>
+  typeof value === "string" ? value.trim().toLowerCase() : "";
+
+const normalizeEntityId = (value: unknown) => {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+};
+
+const normalizeDeliveryAddress = (value: unknown): DeliveryAddress | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const source = value as Record<string, unknown>;
+  const line1 = typeof source.line1 === "string" ? source.line1.trim() : "";
+  if (!line1) {
+    return null;
+  }
+
+  return {
+    line1,
+    line2: typeof source.line2 === "string" && source.line2.trim() ? source.line2.trim() : null,
+    city: typeof source.city === "string" && source.city.trim() ? source.city.trim() : null,
+    district:
+      typeof source.district === "string" && source.district.trim() ? source.district.trim() : null,
+    postalCode:
+      typeof source.postalCode === "string" && source.postalCode.trim()
+        ? source.postalCode.trim()
+        : typeof source.postal_code === "string" && source.postal_code.trim()
+          ? source.postal_code.trim()
+          : null,
+    landmark:
+      typeof source.landmark === "string" && source.landmark.trim() ? source.landmark.trim() : null,
+  };
+};
 
 const withTransaction = async <T>(callback: (client: PoolClient) => Promise<T>) => {
   const client = await pool.connect();
@@ -65,6 +103,24 @@ const getPrescriptionForPatient = async (
   return row;
 };
 
+const assertNoActivePrescriptionOrder = async (client: PoolClient, prescriptionId: string) => {
+  const duplicate = await client.query(
+    `
+      SELECT id
+      FROM orders
+      WHERE prescription_id = $1
+        AND status NOT IN ('cancelled', 'rejected', 'completed', 'delivered')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [prescriptionId]
+  );
+
+  if (duplicate.rows.length) {
+    throw new HttpError(409, "This prescription already has an active order");
+  }
+};
+
 const getPrescriptionItems = async (client: PoolClient, prescriptionId: string) => {
   const result = await client.query(
     `
@@ -90,7 +146,7 @@ const getPrescriptionItems = async (client: PoolClient, prescriptionId: string) 
 
   const items = result.rows
     .map((row) => ({
-      prescriptionItemId: Number(row.prescription_item_id),
+      prescriptionItemId: normalizeEntityId(row.prescription_item_id) ?? "",
       medicineId: row.medicine_id ? Number(row.medicine_id) : null,
       medicineName: row.medicine_name ?? "Medicine",
       requiredQuantity: Number(row.required_quantity ?? 1),
@@ -109,7 +165,12 @@ const getPrescriptionItems = async (client: PoolClient, prescriptionId: string) 
   return items;
 };
 
-const getMarketplaceCoverageRows = async (client: PoolClient, medicineIds: number[], lockInventory = false) => {
+const getMarketplaceCoverageRows = async (
+  client: PoolClient,
+  medicineIds: number[],
+  medicineNames: string[],
+  lockInventory = false
+) => {
   const inventory = await getInventorySchema(client);
   const reservedExpr = getReservedExpr(inventory.reservedCol);
   const result = await client.query(
@@ -119,6 +180,7 @@ const getMarketplaceCoverageRows = async (client: PoolClient, medicineIds: numbe
         mp.pharmacy_id,
         mp.inventory_item_id,
         mp.name AS product_name,
+        m.name AS medicine_name,
         mp.price,
         mp.discount_price,
         mp.requires_prescription,
@@ -135,13 +197,27 @@ const getMarketplaceCoverageRows = async (client: PoolClient, medicineIds: numbe
       JOIN inventory inv
         ON inv.${quoteIdent(inventory.pharmacyCol)} = mp.pharmacy_id
        AND inv.${quoteIdent(inventory.medicineCol)} = mp.inventory_item_id
-      WHERE mp.inventory_item_id = ANY($1::int[])
+      JOIN medicines m
+        ON m.id = inv.${quoteIdent(inventory.medicineCol)}
+      WHERE (
+        (
+          COALESCE(array_length($1::int[], 1), 0) > 0
+          AND mp.inventory_item_id = ANY($1::int[])
+        )
+        OR (
+          COALESCE(array_length($2::text[], 1), 0) > 0
+          AND (
+            LOWER(TRIM(COALESCE(m.name, ''))) = ANY($2::text[])
+            OR LOWER(TRIM(COALESCE(mp.name, ''))) = ANY($2::text[])
+          )
+        )
+      )
         AND mp.is_active = TRUE
         AND LOWER(COALESCE(p.verification_status, 'pending')) = 'approved'
         AND LOWER(COALESCE(p.status, 'active')) NOT IN ('inactive', 'disabled', 'closed', 'suspended')
       ${lockInventory ? "FOR UPDATE OF inv" : ""}
     `,
-    [medicineIds]
+    [medicineIds, medicineNames]
   );
 
   return result.rows;
@@ -150,7 +226,7 @@ const getMarketplaceCoverageRows = async (client: PoolClient, medicineIds: numbe
 const buildPharmacyMatches = (
   prescriptionId: string,
   prescriptionItems: Array<{
-    prescriptionItemId: number;
+    prescriptionItemId: string;
     medicineId: number | null;
     medicineName: string;
     remainingQuantity: number;
@@ -185,7 +261,11 @@ const buildPharmacyMatches = (
       const row = rows.find(
         (candidate) =>
           Number(candidate.pharmacy_id) === match.pharmacy.id &&
-          Number(candidate.inventory_item_id) === Number(item.medicineId)
+          (
+            (item.medicineId !== null && Number(candidate.inventory_item_id) === Number(item.medicineId)) ||
+            normalizeLookupName(candidate.medicine_name) === normalizeLookupName(item.medicineName) ||
+            normalizeLookupName(candidate.product_name) === normalizeLookupName(item.medicineName)
+          )
       );
 
       if (!row) {
@@ -265,16 +345,15 @@ export const buildPrescriptionCartMatches = async (
 ): Promise<PrescriptionBuildCartResponse> =>
   withTransaction(async (client) => {
     await getPrescriptionForPatient(client, prescriptionId, patientId);
+    await assertNoActivePrescriptionOrder(client, prescriptionId);
     const items = await getPrescriptionItems(client, prescriptionId);
     const medicineIds = Array.from(
       new Set(items.map((item) => item.medicineId).filter((value): value is number => Number.isInteger(value)))
     );
-
-    if (!medicineIds.length) {
-      throw new HttpError(409, "Prescription medicines are not mapped to inventory items yet");
-    }
-
-    const rows = await getMarketplaceCoverageRows(client, medicineIds);
+    const medicineNames = Array.from(
+      new Set(items.map((item) => normalizeLookupName(item.medicineName)).filter(Boolean))
+    );
+    const rows = await getMarketplaceCoverageRows(client, medicineIds, medicineNames);
     return buildPharmacyMatches(prescriptionId, items, rows);
   });
 
@@ -289,12 +368,10 @@ export const createPrescriptionLinkedOrder = async (
     const medicineIds = Array.from(
       new Set(items.map((item) => item.medicineId).filter((value): value is number => Number.isInteger(value)))
     );
-
-    if (!medicineIds.length) {
-      throw new HttpError(409, "Prescription medicines are not mapped to inventory items yet");
-    }
-
-    const rows = await getMarketplaceCoverageRows(client, medicineIds, true);
+    const medicineNames = Array.from(
+      new Set(items.map((item) => normalizeLookupName(item.medicineName)).filter(Boolean))
+    );
+    const rows = await getMarketplaceCoverageRows(client, medicineIds, medicineNames, true);
     const matchPayload = buildPharmacyMatches(prescriptionId, items, rows);
     const match = matchPayload.matches.find((entry) => entry.pharmacy.id === input.pharmacyId);
 
@@ -309,7 +386,13 @@ export const createPrescriptionLinkedOrder = async (
       );
     }
 
-    const orderStatus: OrderStatus = match.fullyAvailable ? "pending" : "partially_ready";
+    const paymentMethod: PaymentMethod = input.paymentMethod === "online" ? "online" : "cash";
+    const orderStatus: OrderStatus =
+      paymentMethod === "online"
+        ? "pending_payment"
+        : match.fullyAvailable
+          ? "pending"
+          : "partially_ready";
     const subtotal = match.availableItems.reduce((sum, item) => sum + item.unitPrice * item.requiredQuantity, 0);
     const total = match.availableItems.reduce((sum, item) => sum + item.totalPrice, 0);
 
@@ -323,12 +406,19 @@ export const createPrescriptionLinkedOrder = async (
           subtotal,
           discount_total,
           total,
+          currency,
           fulfillment_type,
+          payment_method,
+          payment_status,
           notes,
+          delivery_address,
+          delivery_notes,
+          delivery_contact_name,
+          delivery_contact_phone,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pickup', $8, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'LKR', $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
         RETURNING id
       `,
       [
@@ -339,7 +429,14 @@ export const createPrescriptionLinkedOrder = async (
         normalizeMoney(subtotal),
         normalizeMoney(subtotal - total),
         normalizeMoney(total),
+        input.fulfillmentMethod ?? "pickup",
+        paymentMethod,
+        paymentMethod === "online" ? "pending" : null,
         input.notes ?? null,
+        input.deliveryAddress ? JSON.stringify(input.deliveryAddress) : null,
+        input.deliveryNotes ?? null,
+        input.deliveryContactName ?? null,
+        input.deliveryContactPhone ?? null,
       ]
     );
 
@@ -360,19 +457,25 @@ export const createPrescriptionLinkedOrder = async (
             order_id,
             marketplace_product_id,
             inventory_item_id,
+            prescription_item_id,
             quantity,
+            requested_quantity,
+            approved_quantity,
             unit_price,
             total_price,
             status,
             created_at,
             updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
         `,
         [
           orderId,
           item.marketplaceProductId,
           item.inventoryItemId,
+          item.prescriptionItemId,
+          item.availableQuantity,
+          item.requiredQuantity,
           item.availableQuantity,
           item.unitPrice,
           item.totalPrice,
@@ -393,6 +496,30 @@ export const createPrescriptionLinkedOrder = async (
       );
     }
 
+    await client.query(
+      `
+        UPDATE prescriptions
+        SET status = 'sent_to_pharmacy'
+        WHERE id = $1
+      `,
+      [prescriptionId]
+    );
+
+    await client.query(
+      `
+        UPDATE prescription_items pi
+        SET matched_inventory_item_id = oi.inventory_item_id,
+            item_status = CASE
+              WHEN COALESCE(oi.approved_quantity, oi.quantity, 0) >= COALESCE(pi.quantity, 1) THEN 'available'
+              ELSE 'partially_available'
+            END
+        FROM order_items oi
+        WHERE oi.order_id = $1
+          AND oi.prescription_item_id = pi.id::text
+      `,
+      [orderId]
+    );
+
     const orderRow = await client.query(
       `
         SELECT o.*, p.name AS pharmacy_name
@@ -410,12 +537,17 @@ export const createPrescriptionLinkedOrder = async (
           oi.id AS order_item_id,
           oi.marketplace_product_id,
           oi.inventory_item_id,
+          oi.prescription_item_id,
           oi.substituted_inventory_item_id,
           oi.substitution_approved,
           oi.quantity,
+          oi.requested_quantity,
+          oi.approved_quantity,
           oi.unit_price,
           oi.total_price,
           oi.status AS item_status,
+          oi.substitution_name,
+          oi.note,
           mp.name,
           mp.image_url,
           mp.requires_prescription
@@ -443,16 +575,24 @@ export const createPrescriptionLinkedOrder = async (
         subtotal: normalizeMoney(subtotal),
         discountTotal: normalizeMoney(subtotal - total),
         total: normalizeMoney(total),
-        fulfillmentType: "pickup" as const,
+        fulfillmentType: orderRow.rows[0]?.fulfillment_type === "delivery" ? "delivery" as const : "pickup" as const,
+        currency: orderRow.rows[0]?.currency ?? "LKR",
+        paymentMethod,
+        paymentStatus: paymentMethod === "online" ? ("pending" as const) : null,
+        paidAt: null,
         notes: input.notes ?? null,
-        deliveryAddress: null,
-        deliveryNotes: null,
-        deliveryContactName: null,
-        deliveryContactPhone: null,
+        pharmacistNote: orderRow.rows[0]?.pharmacist_note ?? null,
+        rejectionReason: orderRow.rows[0]?.rejection_reason ?? null,
+        deliveryAddress: normalizeDeliveryAddress(orderRow.rows[0]?.delivery_address),
+        deliveryNotes: orderRow.rows[0]?.delivery_notes ?? null,
+        deliveryContactName: orderRow.rows[0]?.delivery_contact_name ?? null,
+        deliveryContactPhone: orderRow.rows[0]?.delivery_contact_phone ?? null,
         deliveryStartedAt: null,
         deliveredAt: null,
         createdAt: new Date(orderRow.rows[0]?.created_at ?? new Date()).toISOString(),
         updatedAt: new Date(orderRow.rows[0]?.updated_at ?? new Date()).toISOString(),
+        payment: null,
+        invoice: null,
         items: orderItems.rows.map((row) => ({
           id: Number(row.order_item_id),
           marketplaceProductId: Number(row.marketplace_product_id),
@@ -465,9 +605,17 @@ export const createPrescriptionLinkedOrder = async (
           substitutionApproved: Boolean(row.substitution_approved),
           name: row.name,
           quantity: Number(row.quantity ?? 0),
+          requestedQuantity: Number(row.requested_quantity ?? row.quantity ?? 0),
+          approvedQuantity: Number(row.approved_quantity ?? row.quantity ?? 0),
           unitPrice: normalizeMoney(row.unit_price),
           totalPrice: normalizeMoney(row.total_price),
           status: row.item_status,
+          prescriptionItemId:
+            row.prescription_item_id === null || row.prescription_item_id === undefined
+              ? null
+              : String(row.prescription_item_id),
+          substitutionName: row.substitution_name ?? null,
+          note: row.note ?? null,
           imageUrl: row.image_url ?? null,
           requiresPrescription: Boolean(row.requires_prescription),
         })),
@@ -479,3 +627,78 @@ export const createPrescriptionLinkedOrder = async (
       },
     };
   });
+
+export const getActivePrescriptionOrder = async (
+  prescriptionId: string,
+  pharmacyId?: number | null
+) =>
+  withTransaction(async (client) => {
+    const values: any[] = [prescriptionId];
+    const pharmacyFilter = pharmacyId ? "AND o.pharmacy_id = $2" : "";
+    if (pharmacyId) values.push(pharmacyId);
+    const result = await client.query(
+      `
+        SELECT
+          o.id,
+          o.patient_id,
+          o.pharmacy_id,
+          o.prescription_id,
+          o.status,
+          o.fulfillment_type,
+          o.created_at,
+          o.updated_at,
+          p.name AS pharmacy_name
+        FROM orders o
+        JOIN pharmacies p ON p.id = o.pharmacy_id
+        WHERE o.prescription_id = $1
+          ${pharmacyFilter}
+          AND o.status NOT IN ('cancelled', 'rejected', 'completed', 'delivered')
+        ORDER BY o.created_at DESC, o.id DESC
+        LIMIT 1
+      `,
+      values
+    );
+
+    const row = result.rows[0];
+    return row
+      ? {
+          id: Number(row.id),
+          patientId: Number(row.patient_id),
+          pharmacyId: Number(row.pharmacy_id),
+          prescriptionId: String(row.prescription_id),
+          pharmacyName: row.pharmacy_name,
+          status: row.status,
+          fulfillmentType: row.fulfillment_type === "delivery" ? "delivery" : "pickup",
+          createdAt: new Date(row.created_at).toISOString(),
+          updatedAt: new Date(row.updated_at).toISOString(),
+        }
+      : null;
+  });
+
+export const createScannedPrescriptionOrder = async (
+  pharmacistUserId: number,
+  prescriptionId: string
+) => {
+  const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
+  const patient = await pool.query(
+    `
+      SELECT c.patient_id
+      FROM prescriptions p
+      JOIN consultations c ON c.id = p.consultation_id
+      WHERE p.id = $1
+      LIMIT 1
+    `,
+    [prescriptionId]
+  );
+  const patientId = Number(patient.rows[0]?.patient_id ?? 0);
+  if (!patientId) {
+    throw new HttpError(404, "Prescription patient not found");
+  }
+
+  return createPrescriptionLinkedOrder(patientId, prescriptionId, {
+    pharmacyId: Number(pharmacy.id),
+    acceptPartial: true,
+    fulfillmentMethod: "pickup",
+    notes: "Created from pharmacy QR scan",
+  });
+};

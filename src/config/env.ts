@@ -60,6 +60,9 @@ export const env = {
   pgKeepAliveQueryMs: optionalNumber("PG_KEEP_ALIVE_QUERY_MS", 60000) ?? 60000,
   pgQueryRetry: optionalNumber("PG_QUERY_RETRY", 2) ?? 2,
   geminiApiKey: optionalString("GEMINI_API_KEY"),
+  aiAssistantEnabled: optionalBoolean("AI_ASSISTANT_ENABLED", false),
+  openaiApiKey: optionalString("OPENAI_API_KEY"),
+  openaiModel: optionalString("OPENAI_MODEL") || "gpt-4.1-mini",
   smtpHost: optionalString("SMTP_HOST"),
   smtpPort: optionalNumber("SMTP_PORT", 587) ?? 587,
   smtpSecure: optionalBoolean("SMTP_SECURE", false),
@@ -79,6 +82,14 @@ export const env = {
   receptionistSetupUrl: optionalString("RECEPTIONIST_SETUP_URL"),
   mobileAppScheme: optionalString("MOBILE_APP_SCHEME") || "healthlink",
   queueLateCheckInAction: optionalString("QUEUE_LATE_CHECK_IN_ACTION") || "move_to_end",
+  payHereMerchantId: optionalString("PAYHERE_MERCHANT_ID"),
+  payHereMerchantSecret: optionalString("PAYHERE_MERCHANT_SECRET"),
+  payHereBaseUrl: optionalString("PAYHERE_BASE_URL"),
+  payHereReturnUrl: optionalString("PAYHERE_RETURN_URL"),
+  payHereCancelUrl: optionalString("PAYHERE_CANCEL_URL"),
+  payHereNotifyUrl: optionalString("PAYHERE_NOTIFY_URL"),
+  paymentGatewayMode:
+    optionalString("PAYMENT_GATEWAY_MODE")?.toLowerCase() === "live" ? "live" : "sandbox",
 };
 
 export type Env = typeof env;

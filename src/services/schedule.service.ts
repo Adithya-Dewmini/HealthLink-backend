@@ -12,8 +12,12 @@ export type ScheduleOverviewItem = {
   date: string;
   start: string;
   end: string;
+  clinicId?: string | null;
   clinicName?: string | null;
   clinicType?: string | null;
+  location?: string | null;
+  cover_image_url?: string | null;
+  logo_url?: string | null;
   scheduleId?: number | null;
   patientsCount?: number | null;
   maxPatients?: number | null;
@@ -74,6 +78,7 @@ type CenterScheduleRow = {
   date: string;
   start_time: string;
   end_time: string;
+  room_number?: string | null;
   slot_duration: number;
   max_patients: number;
   patients_count?: number | null;
@@ -86,6 +91,9 @@ type CenterScheduleRow = {
   updated_at: string;
   clinic_name?: string | null;
   clinic_type?: string | null;
+  clinic_location?: string | null;
+  cover_image_url?: string | null;
+  logo_url?: string | null;
   doctor_name?: string | null;
   doctor_email?: string | null;
   specialization?: string | null;
@@ -107,6 +115,7 @@ type RoutineRow = {
   day_of_week: number;
   start_time: string;
   end_time: string;
+  room_number: string | null;
   slot_duration: number;
   max_patients: number;
   is_active: boolean;
@@ -391,6 +400,7 @@ export const checkOverlap = async (input: {
         s.date,
         s.start_time,
         s.end_time,
+        s.room_number,
         s.slot_duration,
         s.max_patients,
         s.is_active,
@@ -499,6 +509,7 @@ const mapScheduleRow = (row: CenterScheduleRow) => ({
   date: row.date,
   start_time: normalizeTime(row.start_time),
   end_time: normalizeTime(row.end_time),
+  room_number: row.room_number?.trim() ? row.room_number.trim() : null,
   slot_duration: row.slot_duration,
   max_patients: row.max_patients,
   is_active: row.is_active,
@@ -1090,7 +1101,10 @@ export const getDoctorScheduleOverview = async (doctorUserId: number, options?: 
           s.created_at,
           s.updated_at,
           mc.name AS clinic_name,
-          mc.type AS clinic_type
+          mc.type AS clinic_type,
+          COALESCE(mc.address, mc.city) AS clinic_location,
+          mc.cover_image_url,
+          mc.logo_url
         FROM medical_center_doctor_schedule s
         JOIN medical_centers mc ON mc.id = s.medical_center_id
         LEFT JOIN LATERAL (
@@ -1143,7 +1157,11 @@ export const getDoctorScheduleOverview = async (doctorUserId: number, options?: 
             start: normalizeTime(schedule.start_time),
             end: normalizeTime(schedule.end_time),
             clinicName: schedule.clinic_name ?? null,
+            clinicId: schedule.medical_center_id ?? null,
             clinicType: schedule.clinic_type ?? null,
+            location: schedule.clinic_location ?? null,
+            cover_image_url: schedule.cover_image_url ?? null,
+            logo_url: schedule.logo_url ?? null,
             scheduleId: schedule.id,
             patientsCount: Number(schedule.patients_count || 0),
             maxPatients:
@@ -1399,7 +1417,7 @@ export const listCenterDoctorRoutines = async (medicalCenterId: string, doctorUs
 
     const result = await client.query<RoutineRow>(
       `
-        SELECT id, doctor_id, clinic_id, day_of_week, start_time, end_time, slot_duration, max_patients, is_active
+        SELECT id, doctor_id, clinic_id, day_of_week, start_time, end_time, room_number, slot_duration, max_patients, is_active
         FROM doctor_routines
         WHERE doctor_id = $1
           AND clinic_id = $2
@@ -1415,6 +1433,7 @@ export const listCenterDoctorRoutines = async (medicalCenterId: string, doctorUs
       clinicName: string;
       startTime: string;
       endTime: string;
+      roomNumber: string | null;
       slotDuration: number;
       maxPatients: number;
     }>>();
@@ -1429,6 +1448,90 @@ export const listCenterDoctorRoutines = async (medicalCenterId: string, doctorUs
         clinicName: "Medical Center",
         startTime: normalizeTime(row.start_time),
         endTime: normalizeTime(row.end_time),
+        roomNumber: row.room_number?.trim() ? row.room_number.trim() : null,
+        slotDuration: row.slot_duration,
+        maxPatients: row.max_patients,
+      });
+    });
+
+    return Array.from(grouped.entries()).map(([dayKey, routines]) => ({
+      day: buildDayName(dayKey),
+      dayKey,
+      routines,
+    }));
+  } finally {
+    client.release();
+  }
+};
+
+export const listDoctorRoutines = async (doctorUserId: number) => {
+  const client = await pool.connect();
+
+  try {
+    const doctorProfile = await getDoctorProfileByUserId(client, doctorUserId);
+
+    const result = await client.query<
+      RoutineRow & {
+        clinic_name: string | null;
+        clinic_location: string | null;
+        cover_image_url: string | null;
+        logo_url: string | null;
+      }
+    >(
+      `
+        SELECT
+          dr.id,
+          dr.doctor_id,
+          dr.clinic_id,
+          dr.day_of_week,
+          dr.start_time,
+          dr.end_time,
+          dr.room_number,
+          dr.slot_duration,
+          dr.max_patients,
+          dr.is_active,
+          mc.name AS clinic_name,
+          COALESCE(mc.address, mc.city) AS clinic_location,
+          mc.cover_image_url,
+          mc.logo_url
+        FROM doctor_routines dr
+        JOIN medical_centers mc ON mc.id = dr.clinic_id
+        WHERE dr.doctor_id = $1
+          AND COALESCE(dr.is_active, TRUE) = TRUE
+        ORDER BY dr.day_of_week ASC, dr.start_time ASC
+      `,
+      [doctorProfile.id]
+    );
+
+    const grouped = new Map<number, Array<{
+      id: string;
+      clinicId: string;
+      clinicName: string;
+      location: string | null;
+      cover_image_url: string | null;
+      logo_url: string | null;
+      startTime: string;
+      endTime: string;
+      roomNumber: string | null;
+      slotDuration: number;
+      maxPatients: number;
+    }>>();
+
+    result.rows.forEach((row) => {
+      if (!grouped.has(row.day_of_week)) {
+        grouped.set(row.day_of_week, []);
+      }
+
+      grouped.get(row.day_of_week)!.push({
+        id: String(row.id),
+        clinicId: row.clinic_id,
+        clinicName: row.clinic_name?.trim() || "Clinic",
+        location: row.clinic_location?.trim() || null,
+        cover_image_url: row.cover_image_url ?? null,
+        logo_url: row.logo_url ?? null,
+        startTime: normalizeTime(row.start_time),
+        endTime: normalizeTime(row.end_time),
+        roomNumber: row.room_number?.trim() ? row.room_number.trim() : null,
         slotDuration: row.slot_duration,
         maxPatients: row.max_patients,
       });
@@ -1486,7 +1589,7 @@ export const saveCenterDoctorRoutine = async (input: {
   maxPatients: number;
   routine: Array<{
     dayOfWeek: number;
-    shifts: Array<{ start: string; end: string }>;
+    shifts: Array<{ start: string; end: string; roomNumber?: string | null }>;
   }>;
 }) => {
   const weeks = Number.isInteger(input.weeks) && Number(input.weeks) > 0 ? Number(input.weeks) : 4;
@@ -1501,7 +1604,7 @@ export const saveCenterDoctorRoutine = async (input: {
     throw createStatusError("max_patients must be greater than 0", 400);
   }
 
-  const mergedRoutineByDay = new Map<number, Array<{ start: string; end: string }>>();
+  const mergedRoutineByDay = new Map<number, Array<{ start: string; end: string; roomNumber: string }>>();
   (Array.isArray(input.routine) ? input.routine : [])
     .filter((day) => Number.isInteger(day?.dayOfWeek) && day.dayOfWeek >= 0 && day.dayOfWeek <= 6)
     .forEach((day) => {
@@ -1510,6 +1613,7 @@ export const saveCenterDoctorRoutine = async (input: {
       const normalizedShifts = (Array.isArray(day.shifts) ? day.shifts : []).map((shift) => ({
         start: normalizeTime(shift.start),
         end: normalizeTime(shift.end),
+        roomNumber: String(shift.roomNumber || "").trim(),
       }));
       mergedRoutineByDay.set(dayOfWeek, [...existing, ...normalizedShifts]);
     });
@@ -1528,6 +1632,9 @@ export const saveCenterDoctorRoutine = async (input: {
   normalizedRoutine.forEach((day) => {
     const sortedShifts = day.shifts
       .map((shift) => {
+        if (!shift.roomNumber) {
+          throw createStatusError("room_number is required for routine shifts", 400);
+        }
         const { startMinutes, endMinutes } = ensureValidTimeRange(shift.start, shift.end);
         const slotCount = Math.floor((endMinutes - startMinutes) / slotDuration);
         if (slotCount <= 0) {
@@ -1595,6 +1702,7 @@ export const saveCenterDoctorRoutine = async (input: {
           date,
           start_time,
           end_time,
+          room_number,
           slot_duration,
           max_patients,
           is_active,
@@ -1634,11 +1742,12 @@ export const saveCenterDoctorRoutine = async (input: {
               day_of_week,
               start_time,
               end_time,
+              room_number,
               slot_duration,
               max_patients,
               is_active
             )
-            VALUES ($1, $2, $3, $4::time, $5::time, $6, $7, TRUE)
+            VALUES ($1, $2, $3, $4::time, $5::time, $6, $7, $8, TRUE)
             RETURNING id
           `,
           [
@@ -1647,6 +1756,7 @@ export const saveCenterDoctorRoutine = async (input: {
             day.dayOfWeek,
             shift.start,
             shift.end,
+            shift.roomNumber,
             slotDuration,
             maxPatients,
           ]
@@ -1686,16 +1796,17 @@ export const saveCenterDoctorRoutine = async (input: {
 
           const existingResult = await client.query<CenterScheduleRow>(
             `
-              SELECT
-                s.id,
-                s.medical_center_id,
-                s.doctor_user_id,
-                s.doctor_profile_id,
-                s.date,
-                s.start_time,
-                s.end_time,
-                s.slot_duration,
-                s.max_patients,
+      SELECT
+        s.id,
+        s.medical_center_id,
+        s.doctor_user_id,
+        s.doctor_profile_id,
+        s.date,
+        s.start_time,
+        s.end_time,
+        s.room_number,
+        s.slot_duration,
+        s.max_patients,
                 s.is_active,
                 s.source,
                 s.routine_id,
@@ -1737,13 +1848,14 @@ export const saveCenterDoctorRoutine = async (input: {
                   date,
                   start_time,
                   end_time,
+                  room_number,
                   slot_duration,
                   max_patients,
                   routine_id,
                   source,
                   is_active
                 )
-                VALUES ($1, $2, $3, $4::date, $5::time, $6::time, $7, $8, $9, 'routine', TRUE)
+                VALUES ($1, $2, $3, $4::date, $5::time, $6::time, $7, $8, $9, $10, 'routine', TRUE)
                 RETURNING
                   id,
                   medical_center_id,
@@ -1752,6 +1864,7 @@ export const saveCenterDoctorRoutine = async (input: {
                   date,
                   start_time,
                   end_time,
+                  room_number,
                   slot_duration,
                   max_patients,
                   is_active,
@@ -1769,6 +1882,7 @@ export const saveCenterDoctorRoutine = async (input: {
                 date,
                 shift.start,
                 shift.end,
+                shift.roomNumber,
                 slotDuration,
                 maxPatients,
                 routineId,
@@ -1801,6 +1915,7 @@ export const saveCenterDoctorRoutine = async (input: {
           const shapeChanged =
             normalizeTime(existing.start_time) !== shift.start ||
             normalizeTime(existing.end_time) !== shift.end ||
+            (existing.room_number?.trim() || "") !== shift.roomNumber ||
             existing.slot_duration !== slotDuration ||
             existing.max_patients !== maxPatients ||
             existing.is_active !== true ||
@@ -1823,15 +1938,16 @@ export const saveCenterDoctorRoutine = async (input: {
               UPDATE medical_center_doctor_schedule
               SET doctor_profile_id = $1,
                   end_time = $2::time,
-                  slot_duration = $3,
-                  max_patients = $4,
-                  routine_id = $5,
+                  room_number = $3,
+                  slot_duration = $4,
+                  max_patients = $5,
+                  routine_id = $6,
                   source = 'routine',
                   is_active = TRUE,
                   invalid_reason = NULL,
                   invalidated_at = NULL,
                   updated_at = NOW()
-              WHERE id = $6
+              WHERE id = $7
               RETURNING
                 id,
                 medical_center_id,
@@ -1840,6 +1956,7 @@ export const saveCenterDoctorRoutine = async (input: {
                 date,
                 start_time,
                 end_time,
+                room_number,
                 slot_duration,
                 max_patients,
                 is_active,
@@ -1850,7 +1967,7 @@ export const saveCenterDoctorRoutine = async (input: {
                 created_at,
                 updated_at
             `,
-            [doctorProfile.id, shift.end, slotDuration, maxPatients, routineId, existing.id]
+            [doctorProfile.id, shift.end, shift.roomNumber, slotDuration, maxPatients, routineId, existing.id]
           );
 
           retainedScheduleIds.add(existing.id);

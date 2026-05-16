@@ -12,12 +12,14 @@ export type PharmacyAnalyticsDashboard = {
   topMedicines: Array<{
     medicineId: number;
     name: string;
+    imageUrl?: string | null;
     quantitySold: number;
     revenue: number;
   }>;
   lowStockMedicines: Array<{
     medicineId: number;
     name: string;
+    imageUrl?: string | null;
     quantity: number;
     reservedQuantity: number;
     availableStock: number;

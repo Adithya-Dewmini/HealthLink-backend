@@ -81,14 +81,16 @@ export const getPharmacyAnalyticsDashboard = async (
           SELECT
             oi.inventory_item_id AS medicine_id,
             mp.name,
+            COALESCE(mp.image_url, m.image_url) AS image_url,
             SUM(oi.quantity)::int AS quantity_sold,
             COALESCE(SUM(oi.total_price), 0)::numeric AS revenue
           FROM order_items oi
           JOIN orders o ON o.id = oi.order_id
           JOIN marketplace_products mp ON mp.id = oi.marketplace_product_id
+          LEFT JOIN medicines m ON m.id = oi.inventory_item_id
           WHERE o.pharmacy_id = $1
             AND o.status IN ('completed', 'ready_for_pickup')
-          GROUP BY oi.inventory_item_id, mp.name
+          GROUP BY oi.inventory_item_id, mp.name, COALESCE(mp.image_url, m.image_url)
           ORDER BY quantity_sold DESC, revenue DESC
           LIMIT 5
         `,
@@ -99,6 +101,7 @@ export const getPharmacyAnalyticsDashboard = async (
           SELECT
             m.id AS medicine_id,
             m.name,
+            m.image_url,
             COALESCE(inv.${quoteIdent(inventory.stockCol)}, 0)::int AS quantity,
             ${
               inventory.reservedCol
@@ -181,12 +184,14 @@ export const getPharmacyAnalyticsDashboard = async (
       topMedicines: topMedicinesResult.rows.map((row) => ({
         medicineId: Number(row.medicine_id),
         name: row.name,
+        imageUrl: typeof row.image_url === "string" ? row.image_url : null,
         quantitySold: Number(row.quantity_sold ?? 0),
         revenue: normalizeMoney(row.revenue),
       })),
       lowStockMedicines: lowStockResult.rows.map((row) => ({
         medicineId: Number(row.medicine_id),
         name: row.name,
+        imageUrl: typeof row.image_url === "string" ? row.image_url : null,
         quantity: Number(row.quantity ?? 0),
         reservedQuantity: Number(row.reserved_quantity ?? 0),
         availableStock: Number(row.available_stock ?? 0),

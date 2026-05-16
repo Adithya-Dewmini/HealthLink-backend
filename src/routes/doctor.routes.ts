@@ -29,6 +29,7 @@ import {
   deleteDoctorExternalSessionController,
   listDoctorExternalSessionsController,
 } from "../controllers/doctorExternalSession.controller";
+import { getDoctorRoutineController } from "../controllers/doctorRoutine.controller";
 import {
   addPatientToQueue,
   endQueue,
@@ -68,6 +69,7 @@ router.get("/working-days", authenticateToken, getWorkingDays);
 router.delete("/availability/:id", authenticateToken, removeAvailability);
 router.put("/availability/:id", authenticateToken, editAvailability);
 router.get("/schedule-overview", authenticateToken, getDoctorScheduleOverviewController);
+router.get("/routines", authenticateToken, getDoctorRoutineController);
 router.get("/external-sessions", authenticateToken, listDoctorExternalSessionsController);
 router.post("/external-sessions", authenticateToken, createDoctorExternalSessionController);
 router.delete(

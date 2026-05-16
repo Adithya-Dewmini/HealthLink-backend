@@ -25,6 +25,11 @@ import {
   buildPrescriptionCartController,
   createPrescriptionOrderController,
 } from "../modules/prescriptionCommerce/controller";
+import {
+  cancelPatientOrderController,
+  getMyOrdersController,
+  getPatientOrderController,
+} from "../modules/orders/controller";
 import { getPatientPharmacies } from "../controllers/patientPharmacy.controller";
 import { getMedicalHistory } from "../controllers/patientMedicalHistory.controller";
 import { addPatient, getAllPatients } from "../controllers/patient.controller";
@@ -62,6 +67,12 @@ router.get("/prescriptions/:id", authMiddleware, getPrescriptionDetail);
 router.patch("/prescriptions/:id/seen", authMiddleware, markPrescriptionSeen);
 router.post("/prescriptions/:id/build-cart", authMiddleware, buildPrescriptionCartController);
 router.post("/prescriptions/:id/create-order", authMiddleware, createPrescriptionOrderController);
+router.post("/prescriptions/:id/order", authMiddleware, createPrescriptionOrderController);
+
+// ✅ Patient pharmacy orders aliases
+router.get("/orders", authMiddleware, getMyOrdersController);
+router.get("/orders/:id", authMiddleware, getPatientOrderController);
+router.patch("/orders/:id/cancel", authMiddleware, cancelPatientOrderController);
 
 // ✅ Patient medical history
 router.get("/medical-history", authMiddleware, getMedicalHistory);

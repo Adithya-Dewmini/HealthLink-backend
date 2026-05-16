@@ -70,13 +70,13 @@ export const getMedicines = async (req: AuthenticatedRequest, res: Response) => 
 
 export const getDoctorConsultation = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    requireDoctorUser(req);
+    const userId = requireDoctorUser(req);
     const queueId = Number(req.params.queueId);
     if (!queueId) {
       return res.status(400).json({ message: "queueId is required" });
     }
 
-    const context = await getDoctorConsultationContext(queueId);
+    const context = await getDoctorConsultationContext(queueId, userId);
     return res.json(context);
   } catch (error) {
     console.error("Doctor consultation fetch error:", error);
@@ -132,9 +132,10 @@ export const updateConsultation = async (
   res: Response
 ) => {
   try {
-    requireDoctorUser(req);
+    const userId = requireDoctorUser(req);
     const consultation = await updateConsultationRecord({
       consultationId: req.params.id,
+      userId,
       symptoms: req.body?.symptoms ?? null,
       diagnosis: req.body?.diagnosis ?? null,
       notes: req.body?.notes ?? null,

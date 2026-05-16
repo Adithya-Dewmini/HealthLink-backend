@@ -2,6 +2,7 @@ import type { Server } from "socket.io";
 import pool from "../config/db";
 import { env } from "../config/env";
 import { emitClinicPublicQueueUpdate } from "../services/clinicRealtime.service";
+import { SOCKET_EVENTS, logRealtimeEmit } from "../services/realtime.service";
 import { BOOKING_STATUS, markMissedBookings, updateNearestBookingStatus } from "../utils/bookingLifecycle";
 
 const APP_TZ = env.appTz;
@@ -21,14 +22,14 @@ const emitQueueEnded = (
   medicalCenterId?: string | null
 ) => {
   const payload = { queueId, type: "CLINIC_ENDED", triggeredBy: "system", doctorId, medicalCenterId };
-  io.to(doctorRoom(doctorId)).emit("queue:update", payload);
-  io.to(legacyDoctorRoom(doctorId)).emit("queue:update", payload);
-  io.to(doctorRoom(doctorId)).emit("queueUpdated", payload);
-  io.to(legacyDoctorRoom(doctorId)).emit("queueUpdated", payload);
-  io.to(receptionRoom).emit("queue:update", payload);
-  io.to(receptionRoom).emit("queueUpdated", payload);
+  for (const room of [doctorRoom(doctorId), legacyDoctorRoom(doctorId), receptionRoom]) {
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, payload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, payload);
+  }
   if (medicalCenterId) {
-    io.to(`center_${medicalCenterId}`).emit("queue:update", payload);
+    const room = `center_${medicalCenterId}`;
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, payload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, payload);
     emitClinicPublicQueueUpdate({
       clinicId: medicalCenterId,
       doctorId,
@@ -38,8 +39,9 @@ const emitQueueEnded = (
   }
   for (const row of patientIds) {
     if (!row?.patient_id) continue;
-    io.to(patientRoom(row.patient_id)).emit("queue:update", payload);
-    io.to(patientRoom(row.patient_id)).emit("queueUpdated", payload);
+    const room = patientRoom(row.patient_id);
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, payload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, payload);
   }
 };
 

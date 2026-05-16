@@ -1,5 +1,7 @@
+import type { DeliveryAddress } from "../orders/types";
+
 export type PrescriptionCartMatchItem = {
-  prescriptionItemId: number;
+  prescriptionItemId: string;
   inventoryItemId: number;
   marketplaceProductId: number;
   medicineName: string;
@@ -12,7 +14,7 @@ export type PrescriptionCartMatchItem = {
 };
 
 export type PrescriptionCartMissingItem = {
-  prescriptionItemId: number;
+  prescriptionItemId: string;
   medicineName: string;
   requiredQuantity: number;
   availableQuantity: number;
@@ -40,5 +42,11 @@ export type PrescriptionBuildCartResponse = {
 export type CreatePrescriptionOrderInput = {
   pharmacyId: number;
   acceptPartial: boolean;
+  fulfillmentMethod?: "pickup" | "delivery";
+  paymentMethod?: "cash" | "online" | null;
   notes?: string | null;
+  deliveryAddress?: DeliveryAddress | null;
+  deliveryNotes?: string | null;
+  deliveryContactName?: string | null;
+  deliveryContactPhone?: string | null;
 };

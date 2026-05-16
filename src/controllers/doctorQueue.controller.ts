@@ -13,9 +13,14 @@ import {
   resolveStartableSchedule,
 } from "../services/doctorQueue.service";
 import { emitClinicPublicQueueUpdate } from "../services/clinicRealtime.service";
+import { SOCKET_EVENTS, logRealtimeEmit } from "../services/realtime.service";
 
 type QueueStartBody = {
   scheduleId?: number | string | null;
+};
+
+type EndQueueBody = {
+  force?: boolean | null;
 };
 
 type AddPatientBody = {
@@ -85,16 +90,15 @@ const broadcastQueueUpdate = (
   }
 ) => {
   const enrichedPayload = { ...payload, doctorId };
-  io.to(doctorRoom(doctorId)).emit("queue:update", enrichedPayload);
-  io.to(legacyDoctorRoom(doctorId)).emit("queue:update", enrichedPayload);
-  io.to(doctorRoom(doctorId)).emit("queueUpdated", enrichedPayload);
-  io.to(legacyDoctorRoom(doctorId)).emit("queueUpdated", enrichedPayload);
-  io.to(receptionRoom).emit("queue:update", enrichedPayload);
-  io.to(receptionRoom).emit("queueUpdated", enrichedPayload);
+  for (const room of [doctorRoom(doctorId), legacyDoctorRoom(doctorId), receptionRoom]) {
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, enrichedPayload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, enrichedPayload);
+  }
 
   if (payload.patientId) {
-    io.to(patientRoom(payload.patientId)).emit("queue:update", enrichedPayload);
-    io.to(patientRoom(payload.patientId)).emit("queueUpdated", enrichedPayload);
+    const room = patientRoom(payload.patientId);
+    io.to(room).emit(SOCKET_EVENTS.queueUpdate, enrichedPayload);
+    logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, enrichedPayload);
   }
   if (payload.medicalCenterId) {
     emitClinicPublicQueueUpdate({
@@ -529,6 +533,7 @@ export const addPatientToQueue = async (
 
 export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) => {
   const client = await pool.connect();
+  let committed = false;
 
   try {
     await client.query("BEGIN");
@@ -554,25 +559,23 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
       return res.status(400).json({ message: "No LIVE queue found today" });
     }
 
-    const completedPatients = await client.query<{ patient_id: number }>(
+    const activePatientResult = await client.query<QueuePatientRow>(
       `
-      UPDATE queue_patients
-      SET status = 'COMPLETED',
-          completed_at = NOW()
+      SELECT *
+      FROM queue_patients
       WHERE queue_id = $1
         AND status = 'WITH_DOCTOR'
-      RETURNING patient_id
+      ORDER BY started_at DESC NULLS LAST, token_number ASC
+      LIMIT 1
+      FOR UPDATE
       `,
       [queue.id]
     );
 
-    for (const row of completedPatients.rows) {
-      await updateNearestBookingStatus(client, {
-        doctorId: Number(doctorId),
-        patientId: Number(row.patient_id),
-        nextStatus: BOOKING_STATUS.COMPLETED,
-        allowedCurrentStatuses: [BOOKING_STATUS.IN_PROGRESS],
-        setEndedAt: true,
+    if (activePatientResult.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "Finish or skip the current patient before calling the next patient",
       });
     }
 
@@ -615,7 +618,7 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
         console.error("Queue empty push error:", error);
       }
 
-      return res.status(409).json({ message: "Queue Empty" });
+      return res.status(409).json({ message: "No patients waiting yet" });
     }
 
     const updatedPatientResult = await client.query<QueuePatientRow>(
@@ -673,6 +676,7 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
     }
 
     await client.query("COMMIT");
+    committed = true;
 
     try {
       const currentToken = updatedPatientResult.rows[0]?.token_number ?? nextPatient.token_number;
@@ -731,7 +735,9 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
       queueId: queue.id,
     });
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (!committed) {
+      await client.query("ROLLBACK");
+    }
     console.error("Next patient error:", error);
     return handleControllerError(res, error, "Server error");
   } finally {
@@ -740,16 +746,21 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
 };
 
 export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
+  const client = await pool.connect();
+  let committed = false;
+
   try {
+    await client.query("BEGIN");
     const userId = getDoctorUserId(req);
-    const doctorId = await requireDoctorIdForUser(userId);
-    const queue = await getLiveQueueForDoctorToday(doctorId);
+    const doctorId = await requireDoctorIdForUser(userId, client);
+    const queue = await getLiveQueueForDoctorToday(doctorId, client);
 
     if (!queue) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ message: "No active queue found today" });
     }
 
-    const skippedResult = await pool.query<{ id: number; patient_id: number | null }>(
+    const skippedResult = await client.query<{ id: number; patient_id: number | null }>(
       `
       UPDATE queue_patients
       SET status = 'MISSED',
@@ -762,76 +773,21 @@ export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
     );
 
     if (skippedResult.rows.length === 0) {
+      await client.query("ROLLBACK");
       return res.status(400).json({ message: "No active patient to skip" });
     }
 
     const missedPatientId = skippedResult.rows[0]?.patient_id ?? null;
     if (missedPatientId) {
-      await updateNearestBookingStatus(pool, {
+      await updateNearestBookingStatus(client, {
         doctorId: Number(doctorId),
         patientId: Number(missedPatientId),
         nextStatus: BOOKING_STATUS.MISSED,
         allowedCurrentStatuses: [BOOKING_STATUS.IN_PROGRESS],
       });
     }
-
-    const nextPatientResult = await pool.query<QueuePatientRow>(
-      `
-      SELECT *
-      FROM queue_patients
-      WHERE queue_id = $1
-        AND status = 'WAITING'
-      ORDER BY token_number ASC
-      LIMIT 1
-      `,
-      [queue.id]
-    );
-
-    const nextPatient = nextPatientResult.rows[0];
-    if (!nextPatient) {
-      broadcastQueueUpdate(doctorId, {
-        queueId: queue.id,
-        type: "QUEUE_EMPTY",
-        triggeredBy: req.user?.role,
-        medicalCenterId: queue.medical_center_id,
-        sessionId: queue.schedule_id,
-      });
-
-      try {
-        const doctorTokens = await loadDoctorTokens(doctorId);
-        await sendExpoPush(
-          doctorTokens.map((token) => ({
-            to: token,
-            title: "Queue Empty",
-            body: "No more patients waiting.",
-            data: { queueId: queue.id },
-          }))
-        );
-      } catch (error) {
-        console.error("Queue empty push error:", error);
-      }
-
-      return res.json({ message: "No more patients in queue" });
-    }
-
-    const updatedPatient = await pool.query(
-      `
-      UPDATE queue_patients
-      SET status = 'WITH_DOCTOR',
-          started_at = NOW()
-      WHERE id = $1
-      RETURNING *
-      `,
-      [nextPatient.id]
-    );
-
-    await updateNearestBookingStatus(pool, {
-      doctorId: Number(doctorId),
-      patientId: Number(nextPatient.patient_id),
-      nextStatus: BOOKING_STATUS.IN_PROGRESS,
-      allowedCurrentStatuses: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
-      setStartedAt: true,
-    });
+    await client.query("COMMIT");
+    committed = true;
 
     broadcastQueueUpdate(doctorId, {
       queueId: queue.id,
@@ -857,69 +813,97 @@ export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
     }
 
     return res.json({
-      message: "Patient skipped. Moved to next patient.",
-      patient: updatedPatient.rows[0],
+      message: "Patient skipped successfully",
     });
   } catch (error) {
+    if (!committed) {
+      await client.query("ROLLBACK");
+    }
     console.error("Skip patient error:", error);
     return handleControllerError(res, error, "Server error");
+  } finally {
+    client.release();
   }
 };
 
-export const endQueue = async (req: DoctorQueueRequest, res: Response) => {
+export const endQueue = async (req: DoctorQueueRequest<EndQueueBody>, res: Response) => {
+  const client = await pool.connect();
+  let committed = false;
+
   try {
+    await client.query("BEGIN");
     const userId = getDoctorUserId(req);
-    const doctorId = await requireDoctorIdForUser(userId);
-    const queue = await getLatestQueueForDoctorToday(doctorId);
+    const doctorId = await requireDoctorIdForUser(userId, client);
+    const queue = await getLatestQueueForDoctorToday(doctorId, client);
 
     if (!queue) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ message: "No active queue found today" });
     }
 
-    const completedPatients = await pool.query<{ patient_id: number }>(
+    const activePatientResult = await client.query<{ id: number }>(
       `
-      UPDATE queue_patients
-      SET status = 'COMPLETED',
-          completed_at = NOW()
+      SELECT id
+      FROM queue_patients
       WHERE queue_id = $1
         AND status = 'WITH_DOCTOR'
-      RETURNING patient_id
+      LIMIT 1
+      FOR UPDATE
       `,
       [queue.id]
     );
 
-    for (const row of completedPatients.rows) {
-      await updateNearestBookingStatus(pool, {
-        doctorId: Number(doctorId),
-        patientId: Number(row.patient_id),
-        nextStatus: BOOKING_STATUS.COMPLETED,
-        allowedCurrentStatuses: [BOOKING_STATUS.IN_PROGRESS],
-        setEndedAt: true,
+    if (activePatientResult.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "Finish or skip the current patient before ending the clinic.",
       });
     }
 
-    const missedPatients = await pool.query<{ patient_id: number }>(
+    const waitingPatientsResult = await client.query<{ patient_id: number }>(
       `
-      UPDATE queue_patients
-      SET status = 'MISSED',
-          missed_at = NOW()
+      SELECT patient_id
+      FROM queue_patients
       WHERE queue_id = $1
         AND status = 'WAITING'
-      RETURNING patient_id
+      FOR UPDATE
       `,
       [queue.id]
     );
 
-    for (const row of missedPatients.rows) {
-      await updateNearestBookingStatus(pool, {
-        doctorId: Number(doctorId),
-        patientId: Number(row.patient_id),
-        nextStatus: BOOKING_STATUS.MISSED,
-        allowedCurrentStatuses: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
+    const forceEnd = Boolean(req.body?.force);
+    if (waitingPatientsResult.rows.length > 0 && !forceEnd) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        message: "There are waiting patients. End clinic anyway?",
+        requiresConfirmation: true,
       });
     }
 
-    const endedQueueResult = await pool.query<QueueRow>(
+    if (waitingPatientsResult.rows.length > 0) {
+      const missedPatients = await client.query<{ patient_id: number }>(
+        `
+        UPDATE queue_patients
+        SET status = 'MISSED',
+            missed_at = NOW()
+        WHERE queue_id = $1
+          AND status = 'WAITING'
+        RETURNING patient_id
+        `,
+        [queue.id]
+      );
+
+      for (const row of missedPatients.rows) {
+        await updateNearestBookingStatus(client, {
+          doctorId: Number(doctorId),
+          patientId: Number(row.patient_id),
+          nextStatus: BOOKING_STATUS.MISSED,
+          allowedCurrentStatuses: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
+        });
+      }
+    }
+
+    const endedQueueResult = await client.query<QueueRow>(
       `
       UPDATE queues
       SET status = 'ENDED'
@@ -928,6 +912,9 @@ export const endQueue = async (req: DoctorQueueRequest, res: Response) => {
       `,
       [queue.id]
     );
+
+    await client.query("COMMIT");
+    committed = true;
 
     const endedQueue = endedQueueResult.rows[0];
 
@@ -959,7 +946,12 @@ export const endQueue = async (req: DoctorQueueRequest, res: Response) => {
       queue: endedQueue,
     });
   } catch (error) {
+    if (!committed) {
+      await client.query("ROLLBACK");
+    }
     console.error("End clinic error:", error);
     return handleControllerError(res, error, "Server error");
+  } finally {
+    client.release();
   }
 };

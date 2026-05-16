@@ -1175,6 +1175,7 @@ export const initDb = async () => {
             day_of_week INTEGER NOT NULL,
             start_time TIME NOT NULL,
             end_time TIME NOT NULL,
+            room_number VARCHAR(120),
             slot_duration INTEGER NOT NULL DEFAULT 15,
             max_patients INTEGER NOT NULL DEFAULT 12,
             is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1183,6 +1184,7 @@ export const initDb = async () => {
           );
 
           ALTER TABLE doctor_routines
+          ADD COLUMN IF NOT EXISTS room_number VARCHAR(120),
           ADD COLUMN IF NOT EXISTS slot_duration INTEGER NOT NULL DEFAULT 15,
           ADD COLUMN IF NOT EXISTS max_patients INTEGER NOT NULL DEFAULT 12,
           ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1348,6 +1350,7 @@ export const initDb = async () => {
             date DATE NOT NULL,
             start_time TIME NOT NULL,
             end_time TIME NOT NULL,
+            room_number VARCHAR(120),
             slot_duration INTEGER NOT NULL,
             max_patients INTEGER NOT NULL,
             routine_id INTEGER REFERENCES doctor_routines(id) ON DELETE SET NULL,
@@ -1416,6 +1419,7 @@ export const initDb = async () => {
 
     await client.query(`
       ALTER TABLE IF EXISTS medical_center_doctor_schedule
+      ADD COLUMN IF NOT EXISTS room_number VARCHAR(120),
       ADD COLUMN IF NOT EXISTS routine_id INTEGER REFERENCES doctor_routines(id) ON DELETE SET NULL,
       ADD COLUMN IF NOT EXISTS source doctor_session_source DEFAULT 'manual',
       ADD COLUMN IF NOT EXISTS mode doctor_session_mode DEFAULT 'HYBRID',
@@ -1700,59 +1704,75 @@ export const initDb = async () => {
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
     `);
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS prescriptions (
-        id SERIAL PRIMARY KEY,
-        consultation_id INTEGER REFERENCES consultations(id) ON DELETE CASCADE,
-        medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE,
-        qr_code TEXT,
-        status VARCHAR(20) DEFAULT 'pending',
-        is_seen BOOLEAN DEFAULT false,
-        issued_at TIMESTAMP DEFAULT NOW(),
-        dispensed_at TIMESTAMP,
-        dispensed_by INTEGER REFERENCES users(id) ON DELETE SET NULL
-      )
-    `);
+	    await client.query(`
+	      CREATE TABLE IF NOT EXISTS prescriptions (
+	        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	        consultation_id INTEGER REFERENCES consultations(id) ON DELETE CASCADE,
+	        medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE,
+	        qr_code TEXT,
+	        status VARCHAR(20) DEFAULT 'pending',
+	        is_seen BOOLEAN DEFAULT false,
+	        issued_at TIMESTAMP DEFAULT NOW(),
+	        dispensed_at TIMESTAMP,
+	        dispensed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+	        expires_at TIMESTAMP,
+	        notes TEXT
+	      )
+	    `);
 
     await client.query(`
       DO $$
       BEGIN
-        IF to_regclass('public.prescriptions') IS NOT NULL THEN
-          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE;
-          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'pending';
-          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS is_seen BOOLEAN DEFAULT false;
-          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS issued_at TIMESTAMP DEFAULT NOW();
-          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_at TIMESTAMP;
-          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
-        END IF;
-      END $$;
-    `);
+	        IF to_regclass('public.prescriptions') IS NOT NULL THEN
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE;
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'pending';
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS is_seen BOOLEAN DEFAULT false;
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS issued_at TIMESTAMP DEFAULT NOW();
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_at TIMESTAMP;
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
+	          ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS notes TEXT;
+	        END IF;
+	      END $$;
+	    `);
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS prescription_items (
-        id SERIAL PRIMARY KEY,
-        prescription_id INTEGER REFERENCES prescriptions(id) ON DELETE CASCADE,
-        medicine_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL,
-        medicine_name TEXT,
-        quantity INTEGER DEFAULT 1,
-        dosage TEXT,
-        frequency TEXT,
-        duration TEXT,
-        instructions TEXT
-      )
-    `);
+	    await client.query(`
+	      CREATE TABLE IF NOT EXISTS prescription_items (
+	        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+	        prescription_id UUID REFERENCES prescriptions(id) ON DELETE CASCADE,
+	        medicine_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL,
+	        medicine_name TEXT,
+	        quantity INTEGER DEFAULT 1,
+	        dosage TEXT,
+	        frequency TEXT,
+	        duration TEXT,
+	        instructions TEXT,
+	        dispensed_quantity INTEGER DEFAULT 0,
+	        matched_inventory_item_id INTEGER,
+	        item_status TEXT NOT NULL DEFAULT 'pending',
+	        fulfilled_quantity INTEGER NOT NULL DEFAULT 0,
+	        substitution_allowed BOOLEAN NOT NULL DEFAULT TRUE
+	      )
+	    `);
 
     await client.query(`
       DO $$
       BEGIN
-        IF to_regclass('public.prescription_items') IS NOT NULL THEN
-          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS medicine_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL;
-          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1;
-          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS dispensed_quantity INTEGER DEFAULT 0;
-          UPDATE prescription_items SET dispensed_quantity = 0 WHERE dispensed_quantity IS NULL;
-        END IF;
-      END $$;
-    `);
+	        IF to_regclass('public.prescription_items') IS NOT NULL THEN
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS medicine_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL;
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1;
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS dispensed_quantity INTEGER DEFAULT 0;
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS matched_inventory_item_id INTEGER;
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS item_status TEXT NOT NULL DEFAULT 'pending';
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS fulfilled_quantity INTEGER NOT NULL DEFAULT 0;
+	          ALTER TABLE prescription_items ADD COLUMN IF NOT EXISTS substitution_allowed BOOLEAN NOT NULL DEFAULT TRUE;
+	          UPDATE prescription_items SET dispensed_quantity = 0 WHERE dispensed_quantity IS NULL;
+	          UPDATE prescription_items
+	          SET fulfilled_quantity = COALESCE(fulfilled_quantity, dispensed_quantity, 0)
+	          WHERE fulfilled_quantity IS NULL;
+	        END IF;
+	      END $$;
+	    `);
 
     await client.query(`
       UPDATE prescription_items pi
@@ -1834,6 +1854,189 @@ export const initDb = async () => {
           ALTER TABLE medicines DROP COLUMN IF EXISTS stock;
         END IF;
       END $$;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS inventory (
+        id BIGSERIAL PRIMARY KEY,
+        pharmacy_id INTEGER NOT NULL REFERENCES pharmacies(id) ON DELETE CASCADE,
+        medicine_id INTEGER NOT NULL REFERENCES medicines(id) ON DELETE CASCADE,
+        stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
+        unit_price NUMERIC(10,2),
+        reserved_quantity INTEGER NOT NULL DEFAULT 0 CHECK (reserved_quantity >= 0),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE (pharmacy_id, medicine_id)
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.inventory') IS NOT NULL THEN
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS medicine_id INTEGER REFERENCES medicines(id) ON DELETE CASCADE;
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS stock INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10,2);
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS reserved_quantity INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE inventory ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      UPDATE inventory
+      SET reserved_quantity = 0
+      WHERE reserved_quantity IS NULL
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_pharmacy_medicine_unique
+      ON inventory (pharmacy_id, medicine_id)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_inventory_pharmacy_stock
+      ON inventory (pharmacy_id, stock)
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sales (
+        id BIGSERIAL PRIMARY KEY,
+        pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE,
+        prescription_id UUID REFERENCES prescriptions(id) ON DELETE SET NULL,
+        sold_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        total_amount NUMERIC(10,2) NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.sales') IS NOT NULL THEN
+          ALTER TABLE sales ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+          ALTER TABLE sales ADD COLUMN IF NOT EXISTS prescription_id UUID REFERENCES prescriptions(id) ON DELETE SET NULL;
+          ALTER TABLE sales ADD COLUMN IF NOT EXISTS sold_by INTEGER REFERENCES users(id) ON DELETE SET NULL;
+          ALTER TABLE sales ADD COLUMN IF NOT EXISTS total_amount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          ALTER TABLE sales ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE sales ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sales_pharmacy_created
+      ON sales (pharmacy_id, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sales_prescription_id
+      ON sales (prescription_id)
+      WHERE prescription_id IS NOT NULL
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sale_items (
+        id BIGSERIAL PRIMARY KEY,
+        sale_id BIGINT NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+        medicine_id INTEGER NOT NULL REFERENCES medicines(id) ON DELETE RESTRICT,
+        prescription_item_id TEXT,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        unit_price NUMERIC(10,2) NOT NULL,
+        line_total NUMERIC(10,2),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.sale_items') IS NOT NULL THEN
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS sale_id BIGINT REFERENCES sales(id) ON DELETE CASCADE;
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS medicine_id INTEGER REFERENCES medicines(id) ON DELETE RESTRICT;
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS prescription_item_id TEXT;
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS quantity INTEGER;
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10,2);
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS line_total NUMERIC(10,2);
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'sale_items'
+            AND column_name = 'prescription_item_id'
+            AND data_type <> 'text'
+        ) THEN
+          ALTER TABLE sale_items
+          ALTER COLUMN prescription_item_id TYPE TEXT
+          USING prescription_item_id::text;
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sale_items_sale_id
+      ON sale_items (sale_id)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sale_items_medicine_id
+      ON sale_items (medicine_id)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sale_items_prescription_item
+      ON sale_items (prescription_item_id)
+      WHERE prescription_item_id IS NOT NULL
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS demand_logs (
+        id BIGSERIAL PRIMARY KEY,
+        pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE,
+        medicine_id INTEGER NOT NULL REFERENCES medicines(id) ON DELETE CASCADE,
+        prescription_id UUID REFERENCES prescriptions(id) ON DELETE SET NULL,
+        source TEXT NOT NULL DEFAULT 'dispense',
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.demand_logs') IS NOT NULL THEN
+          ALTER TABLE demand_logs ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+          ALTER TABLE demand_logs ADD COLUMN IF NOT EXISTS medicine_id INTEGER REFERENCES medicines(id) ON DELETE CASCADE;
+          ALTER TABLE demand_logs ADD COLUMN IF NOT EXISTS prescription_id UUID REFERENCES prescriptions(id) ON DELETE SET NULL;
+          ALTER TABLE demand_logs ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'dispense';
+          ALTER TABLE demand_logs ADD COLUMN IF NOT EXISTS quantity INTEGER;
+          ALTER TABLE demand_logs ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_demand_logs_pharmacy_medicine_created
+      ON demand_logs (pharmacy_id, medicine_id, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_demand_logs_prescription_id
+      ON demand_logs (prescription_id)
+      WHERE prescription_id IS NOT NULL
     `);
 
     await client.query(`
@@ -1966,7 +2169,12 @@ export const initDb = async () => {
         subtotal NUMERIC(10,2) NOT NULL,
         discount_total NUMERIC(10,2) NOT NULL DEFAULT 0,
         total NUMERIC(10,2) NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'LKR',
         fulfillment_type TEXT NOT NULL DEFAULT 'pickup',
+        payment_method TEXT,
+        payment_status TEXT,
+        paid_at TIMESTAMP,
+        invoice_id BIGINT,
         notes TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -1980,15 +2188,23 @@ export const initDb = async () => {
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS patient_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS prescription_id UUID REFERENCES prescriptions(id) ON DELETE SET NULL;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_code TEXT;
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2);
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_total NUMERIC(10,2) NOT NULL DEFAULT 0;
 	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS total NUMERIC(10,2);
-          ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT NOT NULL DEFAULT 'pickup';
-          ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT;
-          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address JSONB;
-          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_notes TEXT;
-          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_contact_name TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'LKR';
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_type TEXT NOT NULL DEFAULT 'pickup';
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at TIMESTAMP;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS invoice_id BIGINT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS pharmacist_note TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_address JSONB;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_notes TEXT;
+	          ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_contact_name TEXT;
           ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_contact_phone TEXT;
           ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_started_at TIMESTAMP;
           ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP;
@@ -2020,14 +2236,182 @@ export const initDb = async () => {
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE;
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS marketplace_product_id BIGINT REFERENCES marketplace_products(id) ON DELETE RESTRICT;
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS inventory_item_id INTEGER REFERENCES medicines(id) ON DELETE RESTRICT;
-	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS substituted_inventory_item_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL;
+		          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS prescription_item_id TEXT;
+		          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS substituted_inventory_item_id INTEGER REFERENCES medicines(id) ON DELETE SET NULL;
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS substitution_approved BOOLEAN NOT NULL DEFAULT FALSE;
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS quantity INTEGER;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS requested_quantity INTEGER;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS approved_quantity INTEGER;
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC(10,2);
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS total_price NUMERIC(10,2);
 	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
-          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
-          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS substitution_name TEXT;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS note TEXT;
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+	          ALTER TABLE order_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+	        END IF;
+		      END $$;
+		    `);
+
+	    await client.query(`
+	      DO $$
+	      BEGIN
+	        IF EXISTS (
+	          SELECT 1
+	          FROM information_schema.columns
+	          WHERE table_schema = 'public'
+	            AND table_name = 'order_items'
+	            AND column_name = 'prescription_item_id'
+	            AND data_type <> 'text'
+	        ) THEN
+	          ALTER TABLE order_items
+	          ALTER COLUMN prescription_item_id TYPE TEXT
+	          USING prescription_item_id::text;
+	        END IF;
+	      END $$;
+	    `);
+
+	    await client.query(`
+	      UPDATE orders
+	      SET order_code = CONCAT('HL-', id)
+	      WHERE order_code IS NULL
+	    `);
+
+	    await client.query(`
+	      UPDATE orders
+	      SET payment_method = COALESCE(payment_method, 'cash')
+	      WHERE payment_method IS NULL
+	    `);
+
+	    await client.query(`
+	      UPDATE order_items
+	      SET requested_quantity = COALESCE(requested_quantity, quantity),
+	          approved_quantity = COALESCE(approved_quantity, quantity)
+	      WHERE requested_quantity IS NULL
+	         OR approved_quantity IS NULL
+	    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id BIGSERIAL PRIMARY KEY,
+        order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        patient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        pharmacy_id INTEGER NOT NULL REFERENCES pharmacies(id) ON DELETE CASCADE,
+        gateway TEXT NOT NULL,
+        gateway_payment_id TEXT,
+        gateway_order_id TEXT,
+        amount NUMERIC(10,2) NOT NULL,
+        currency TEXT NOT NULL DEFAULT 'LKR',
+        status TEXT NOT NULL DEFAULT 'pending',
+        method TEXT,
+        card_no_masked TEXT,
+        status_message TEXT,
+        raw_payload JSONB,
+        verified_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.payments') IS NOT NULL THEN
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS patient_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS gateway TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS gateway_payment_id TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS gateway_order_id TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS amount NUMERIC(10,2);
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'LKR';
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS method TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS card_no_masked TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS status_message TEXT;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS raw_payload JSONB;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP;
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE payments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      ALTER TABLE payments
+      DROP CONSTRAINT IF EXISTS payments_status_check;
+    `);
+
+    await client.query(`
+      ALTER TABLE payments
+      ADD CONSTRAINT payments_status_check
+      CHECK (status IN ('pending', 'paid', 'failed', 'cancelled', 'refunded'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS invoices (
+        id BIGSERIAL PRIMARY KEY,
+        invoice_no TEXT NOT NULL UNIQUE,
+        order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        payment_id BIGINT REFERENCES payments(id) ON DELETE SET NULL,
+        patient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        pharmacy_id INTEGER NOT NULL REFERENCES pharmacies(id) ON DELETE CASCADE,
+        subtotal NUMERIC(10,2) NOT NULL DEFAULT 0,
+        delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
+        service_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
+        discount NUMERIC(10,2) NOT NULL DEFAULT 0,
+        total NUMERIC(10,2) NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'LKR',
+        pdf_url TEXT,
+        issued_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.invoices') IS NOT NULL THEN
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_no TEXT;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS order_id BIGINT REFERENCES orders(id) ON DELETE CASCADE;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_id BIGINT REFERENCES payments(id) ON DELETE SET NULL;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS patient_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS pharmacy_id INTEGER REFERENCES pharmacies(id) ON DELETE CASCADE;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS subtotal NUMERIC(10,2) NOT NULL DEFAULT 0;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS service_fee NUMERIC(10,2) NOT NULL DEFAULT 0;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS discount NUMERIC(10,2) NOT NULL DEFAULT 0;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS total NUMERIC(10,2) NOT NULL DEFAULT 0;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'LKR';
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS pdf_url TEXT;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS issued_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
+        END IF;
+      END $$;
+    `);
+
+    await client.query(`
+      UPDATE invoices
+      SET invoice_no = CONCAT('HL-INV-', TO_CHAR(COALESCE(issued_at, created_at, NOW()), 'YYYYMMDD'), '-', LPAD(id::text, 6, '0'))
+      WHERE invoice_no IS NULL
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('public.orders') IS NOT NULL
+          AND to_regclass('public.invoices') IS NOT NULL THEN
+          BEGIN
+            ALTER TABLE orders
+            ADD CONSTRAINT orders_invoice_id_fkey
+            FOREIGN KEY (invoice_id)
+            REFERENCES invoices(id)
+            ON DELETE SET NULL;
+          EXCEPTION
+            WHEN duplicate_object THEN NULL;
+          END;
         END IF;
       END $$;
     `);
@@ -2047,6 +2431,11 @@ export const initDb = async () => {
       ON orders (pharmacy_id, status, created_at DESC)
     `);
 
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_orders_payment_status
+      ON orders (payment_method, payment_status, status)
+    `);
+
 	    await client.query(`
 	      CREATE INDEX IF NOT EXISTS idx_order_items_order_id
 	      ON order_items (order_id)
@@ -2057,6 +2446,62 @@ export const initDb = async () => {
 	      ON orders (prescription_id)
 	      WHERE prescription_id IS NOT NULL
 	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_orders_prescription_active
+	      ON orders (prescription_id, status)
+	      WHERE prescription_id IS NOT NULL
+	    `);
+
+	    await client.query(`
+	      CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_code
+	      ON orders (order_code)
+	      WHERE order_code IS NOT NULL
+	    `);
+
+	    await client.query(`
+	      CREATE INDEX IF NOT EXISTS idx_order_items_prescription_item
+	      ON order_items (prescription_item_id)
+	      WHERE prescription_item_id IS NOT NULL
+	    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_payments_order_id
+      ON payments (order_id, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_gateway_order_id
+      ON payments (gateway_order_id)
+      WHERE gateway_order_id IS NOT NULL
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_gateway_payment_id
+      ON payments (gateway_payment_id)
+      WHERE gateway_payment_id IS NOT NULL
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_payments_patient_status
+      ON payments (patient_id, status, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_payments_pharmacy_status
+      ON payments (pharmacy_id, status, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_order_id
+      ON invoices (order_id)
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_payment_id
+      ON invoices (payment_id)
+      WHERE payment_id IS NOT NULL
+    `);
 
 	    await client.query(`
 	      CREATE TABLE IF NOT EXISTS push_tokens (

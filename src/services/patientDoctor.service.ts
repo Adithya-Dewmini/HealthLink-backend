@@ -2,6 +2,7 @@ import pool from "../config/db";
 import { env } from "../config/env";
 import { io } from "../server";
 import { emitClinicPublicQueueUpdate } from "./clinicRealtime.service";
+import { SOCKET_EVENTS, logRealtimeEmit } from "./realtime.service";
 import { filterExpoTokens, sendExpoPush } from "../utils/expoPush";
 import { BOOKING_STATUS, updateNearestBookingStatus } from "../utils/bookingLifecycle";
 
@@ -995,53 +996,22 @@ export const joinDoctorQueueForPatient = async (
 
     await client.query("COMMIT");
 
-    io.to(doctorRoom(doctorId)).emit("queueUpdated", {
-      doctorId,
-      queueId: queue.id,
-      type: "PATIENT_ADDED",
-      triggeredBy: role,
-    });
-    io.to(doctorRoom(doctorId)).emit("queue:update", {
+    const queuePayload = {
       doctorId,
       queueId: queue.id,
       type: "PATIENT_JOINED",
       triggeredBy: role,
       patientId,
-    });
-    io.to(`doctor_${doctorId}`).emit("queue:update", {
-      doctorId,
-      queueId: queue.id,
-      type: "PATIENT_JOINED",
-      triggeredBy: role,
-      patientId,
-    });
-    io.to(`doctor-${doctorId}`).emit("queue:update", {
-      doctorId,
-      queueId: queue.id,
-      type: "PATIENT_JOINED",
-      triggeredBy: role,
-      patientId,
-    });
-    io.to(`patient_${patientId}`).emit("queue:update", {
-      doctorId,
-      queueId: queue.id,
-      type: "PATIENT_JOINED",
-      triggeredBy: role,
-      patientId,
-    });
-    io.to(receptionRoom).emit("queueUpdated", {
-      doctorId,
-      queueId: queue.id,
-      type: "PATIENT_ADDED",
-      triggeredBy: role,
-    });
-    io.to(receptionRoom).emit("queue:update", {
-      doctorId,
-      queueId: queue.id,
-      type: "PATIENT_JOINED",
-      triggeredBy: role,
-      patientId,
-    });
+    };
+    for (const room of [
+      doctorRoom(doctorId),
+      `doctor_${doctorId}`,
+      `patient_${patientId}`,
+      receptionRoom,
+    ]) {
+      io.to(room).emit(SOCKET_EVENTS.queueUpdate, queuePayload);
+      logRealtimeEmit(SOCKET_EVENTS.queueUpdate, room, queuePayload);
+    }
     if (queue.medical_center_id) {
       emitClinicPublicQueueUpdate({
         clinicId: queue.medical_center_id,

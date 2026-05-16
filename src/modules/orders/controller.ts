@@ -7,14 +7,17 @@ import {
   getPharmacyMemberUserIds,
 } from "../../services/notification.service";
 import { createAuditLog, getAuditRequestContext } from "../../services/audit.service";
-import { emitOrderUpdated, emitPrescriptionUpdated } from "../../services/realtime.service";
+import { emitOrderCreated, emitOrderUpdated, emitPrescriptionUpdated } from "../../services/realtime.service";
 import { HttpError, isHttpError } from "../pharmacy/errors";
 import {
+  cancelPatientOrder,
   checkoutCart,
   getPatientOrderDetails,
   getPatientOrders,
   getPharmacyOrderDetails,
   getPharmacyOrders,
+  rejectPharmacyOrder,
+  reviewPharmacyOrder,
   updatePharmacyOrderStatus,
 } from "./service";
 import {
@@ -25,6 +28,8 @@ import {
 import {
   validateCheckoutPayload,
   validateOrderRouteId,
+  validateRejectOrderPayload,
+  validateReviewOrderPayload,
   validateOrderStatusPayload,
 } from "./validation";
 
@@ -149,6 +154,11 @@ const notifyOrderStatusChange = async (order: Awaited<ReturnType<typeof checkout
       body: `Order #${order.id} was cancelled.`,
       type: "order_cancelled",
     },
+    rejected: {
+      title: "Order rejected",
+      body: `Order #${order.id} was rejected by ${order.pharmacyName}.`,
+      type: "order_rejected",
+    },
   };
 
   const notification = labelByStatus[order.status];
@@ -205,6 +215,14 @@ const recordOrderLifecycleActivity = async (
       title: "Cancelled",
       description: `Order #${order.id} was cancelled.`,
     },
+    order_rejected: {
+      title: "Rejected",
+      description: `Order #${order.id} was rejected.`,
+    },
+    order_reviewed: {
+      title: "Order reviewed",
+      description: `${order.pharmacyName} reviewed order #${order.id}.`,
+    },
     substitution_approval_required: {
       title: "Substitution approval required",
       description: `Order #${order.id} is waiting for your substitution approval.`,
@@ -242,13 +260,16 @@ export const checkoutController = async (req: Request, res: Response) => {
     const patientId = requirePatientUser(req);
     const payload = validateCheckoutPayload(req.body);
     const data = await checkoutCart(patientId, payload);
-    await notifyPharmacyOrderCreated({
-      patientId,
-      pharmacyId: data.order.pharmacyId,
-      pharmacyName: data.order.pharmacyName,
-      orderId: data.order.id,
-      prescriptionId: data.order.prescriptionId,
-    });
+    if (!(data.order.paymentMethod === "online" && data.order.paymentStatus === "pending")) {
+      await notifyPharmacyOrderCreated({
+        patientId,
+        pharmacyId: data.order.pharmacyId,
+        pharmacyName: data.order.pharmacyName,
+        orderId: data.order.id,
+        prescriptionId: data.order.prescriptionId,
+      });
+    }
+    emitOrderCreated(data.order);
     emitOrderUpdated(data.order);
     await recordOrderLifecycleActivity(data.order, "order_created");
     await createAuditLog({
@@ -304,6 +325,32 @@ export const getPatientOrderTimelineController = async (req: Request, res: Respo
   }
 };
 
+export const cancelPatientOrderController = async (req: Request, res: Response) => {
+  try {
+    const patientId = requirePatientUser(req);
+    const orderId = validateOrderRouteId(req.params.id);
+    const data = await cancelPatientOrder(patientId, orderId);
+    await notifyOrderStatusChange(data.order);
+    await recordOrderLifecycleActivity(data.order, "order_cancelled");
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: patientId,
+      actorRole: "patient",
+      userId: patientId,
+      action: "order_cancelled",
+      entityType: "order",
+      entityId: data.order.id,
+      metadata: {
+        pharmacyId: data.order.pharmacyId,
+        prescriptionId: data.order.prescriptionId,
+      },
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    return handleError(res, error, "Failed to cancel order");
+  }
+};
+
 export const getPharmacyOrdersController = async (req: Request, res: Response) => {
   try {
     const pharmacistUserId = await requireVerifiedPharmacist(req);
@@ -350,6 +397,7 @@ export const updatePharmacyOrderStatusController = async (req: Request, res: Res
       delivered: "order_delivered",
       completed: "order_completed",
       cancelled: "order_cancelled",
+      rejected: "order_rejected",
       awaiting_substitution_approval: "substitution_approval_required",
       partially_ready: "partially_ready",
     };
@@ -374,5 +422,89 @@ export const updatePharmacyOrderStatusController = async (req: Request, res: Res
     return res.status(200).json(data);
   } catch (error) {
     return handleError(res, error, "Failed to update pharmacy order");
+  }
+};
+
+export const reviewPharmacyOrderController = async (req: Request, res: Response) => {
+  try {
+    const pharmacistUserId = await requireVerifiedPharmacist(req);
+    const payload = validateReviewOrderPayload(req.params.id, req.body);
+    const data = await reviewPharmacyOrder(pharmacistUserId, payload);
+    await notifyOrderStatusChange(data.order);
+    await recordOrderLifecycleActivity(data.order, "order_reviewed");
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      actorRole: "pharmacist",
+      userId: pharmacistUserId,
+      action: "order_reviewed",
+      entityType: "order",
+      entityId: data.order.id,
+      metadata: {
+        status: data.order.status,
+        pharmacyId: data.order.pharmacyId,
+        prescriptionId: data.order.prescriptionId,
+      },
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    return handleError(res, error, "Failed to review pharmacy order");
+  }
+};
+
+export const rejectPharmacyOrderController = async (req: Request, res: Response) => {
+  try {
+    const pharmacistUserId = await requireVerifiedPharmacist(req);
+    const payload = validateRejectOrderPayload(req.params.id, req.body);
+    const data = await rejectPharmacyOrder(pharmacistUserId, payload);
+    await notifyOrderStatusChange(data.order);
+    await recordOrderLifecycleActivity(data.order, "order_rejected");
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      actorRole: "pharmacist",
+      userId: pharmacistUserId,
+      action: "order_rejected",
+      entityType: "order",
+      entityId: data.order.id,
+      metadata: {
+        pharmacyId: data.order.pharmacyId,
+        prescriptionId: data.order.prescriptionId,
+        reason: payload.reason,
+      },
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    return handleError(res, error, "Failed to reject pharmacy order");
+  }
+};
+
+export const completePharmacyOrderController = async (req: Request, res: Response) => {
+  try {
+    const pharmacistUserId = await requireVerifiedPharmacist(req);
+    const orderId = validateOrderRouteId(req.params.id);
+    const data = await updatePharmacyOrderStatus(pharmacistUserId, {
+      id: orderId,
+      status: "completed",
+      note: typeof req.body?.note === "string" ? req.body.note.trim() || null : null,
+    });
+    await notifyOrderStatusChange(data.order);
+    await recordOrderLifecycleActivity(data.order, "order_completed");
+    await createAuditLog({
+      ...getAuditRequestContext(req),
+      actorUserId: pharmacistUserId,
+      actorRole: "pharmacist",
+      userId: pharmacistUserId,
+      action: "order_completed",
+      entityType: "order",
+      entityId: data.order.id,
+      metadata: {
+        pharmacyId: data.order.pharmacyId,
+        prescriptionId: data.order.prescriptionId,
+      },
+    });
+    return res.status(200).json(data);
+  } catch (error) {
+    return handleError(res, error, "Failed to complete pharmacy order");
   }
 };

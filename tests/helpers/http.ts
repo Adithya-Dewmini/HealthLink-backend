@@ -39,6 +39,11 @@ export const createMockResponse = () => {
     return res as Response;
   });
 
+  res.send = vi.fn((payload?: unknown) => {
+    res.body = payload;
+    return res as Response;
+  });
+
   return res as Response & {
     statusCode: number;
     body?: unknown;

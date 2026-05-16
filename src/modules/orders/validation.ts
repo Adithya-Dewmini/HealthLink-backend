@@ -4,6 +4,9 @@ import {
   type CheckoutInput,
   type DeliveryAddress,
   type OrderStatus,
+  type RejectOrderInput,
+  type ReviewOrderInput,
+  type ReviewOrderItemInput,
   type UpdateOrderStatusInput,
 } from "./types";
 
@@ -49,6 +52,13 @@ const parseDeliveryAddress = (value: unknown): DeliveryAddress => {
 
 export const validateCheckoutPayload = (body: any): CheckoutInput => {
   const fulfillmentType = asTrimmedString(body?.fulfillment_type ?? body?.fulfillmentType).toLowerCase();
+  const paymentMethodRaw = asTrimmedString(body?.payment_method ?? body?.paymentMethod).toLowerCase();
+  const paymentMethod =
+    paymentMethodRaw === "online"
+      ? "online"
+      : paymentMethodRaw === "cash" || paymentMethodRaw === "pay_at_pharmacy" || paymentMethodRaw === "cash_on_pickup"
+        ? "cash"
+        : null;
   const notes = asTrimmedString(body?.notes);
 
   if (fulfillmentType !== "pickup" && fulfillmentType !== "delivery") {
@@ -74,6 +84,7 @@ export const validateCheckoutPayload = (body: any): CheckoutInput => {
 
     return {
       fulfillmentType: "delivery",
+      paymentMethod,
       notes: notes || null,
       deliveryAddress,
       deliveryNotes: optionalTrimmedString(body?.delivery_notes ?? body?.deliveryNotes),
@@ -84,6 +95,7 @@ export const validateCheckoutPayload = (body: any): CheckoutInput => {
 
   return {
     fulfillmentType: "pickup",
+    paymentMethod,
     notes: notes || null,
     deliveryAddress: null,
     deliveryNotes: null,
@@ -99,11 +111,82 @@ export const validateOrderStatusPayload = (
   body: any
 ): UpdateOrderStatusInput => {
   const id = validateOrderRouteId(idValue);
-  const status = asTrimmedString(body?.status).toLowerCase();
+  const rawStatus = asTrimmedString(body?.status).toLowerCase();
+  const status = rawStatus === "accepted"
+    ? "confirmed"
+    : rawStatus === "pending_review"
+      ? "pending"
+      : rawStatus === "partially_fulfilled"
+        ? "partially_ready"
+        : rawStatus;
 
   if (!isOrderStatus(status)) {
     throw new HttpError(400, `status must be one of: ${ORDER_STATUSES.join(", ")}`);
   }
 
-  return { id, status };
+  return { id, status, note: optionalTrimmedString(body?.note) };
+};
+
+const REVIEW_ITEM_STATUSES = ["available", "partial", "unavailable", "substituted"] as const;
+
+const parseNonNegativeInt = (value: unknown, label: string) => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new HttpError(400, `Valid ${label} is required`);
+  }
+  return parsed;
+};
+
+const validateReviewItem = (item: any): ReviewOrderItemInput => {
+  const itemStatus = asTrimmedString(item?.itemStatus ?? item?.item_status).toLowerCase();
+  if (!REVIEW_ITEM_STATUSES.includes(itemStatus as ReviewOrderItemInput["itemStatus"])) {
+    throw new HttpError(400, "Valid item status is required");
+  }
+
+  const approvedQuantity = parseNonNegativeInt(
+    item?.approvedQuantity ?? item?.approved_quantity,
+    "approved quantity"
+  );
+  const note = optionalTrimmedString(item?.note);
+
+  if (itemStatus === "unavailable" && !note) {
+    throw new HttpError(400, "Unavailable items require a note");
+  }
+
+  return {
+    orderItemId: parsePositiveInt(item?.orderItemId ?? item?.order_item_id, "order item id"),
+    inventoryItemId:
+      item?.inventoryItemId === null || item?.inventory_item_id === null
+        ? null
+        : item?.inventoryItemId !== undefined || item?.inventory_item_id !== undefined
+          ? parsePositiveInt(item?.inventoryItemId ?? item?.inventory_item_id, "inventory item id")
+          : undefined,
+    approvedQuantity,
+    itemStatus: itemStatus as ReviewOrderItemInput["itemStatus"],
+    substitutionName: optionalTrimmedString(item?.substitutionName ?? item?.substitution_name),
+    note,
+  };
+};
+
+export const validateReviewOrderPayload = (idValue: unknown, body: any): ReviewOrderInput => {
+  const id = validateOrderRouteId(idValue);
+  const rawItems = Array.isArray(body?.items) ? body.items : [];
+  if (!rawItems.length) {
+    throw new HttpError(400, "At least one review item is required");
+  }
+
+  return {
+    id,
+    items: rawItems.map(validateReviewItem),
+    pharmacistNote: optionalTrimmedString(body?.pharmacistNote ?? body?.pharmacist_note),
+  };
+};
+
+export const validateRejectOrderPayload = (idValue: unknown, body: any): RejectOrderInput => {
+  const id = validateOrderRouteId(idValue);
+  const reason = asTrimmedString(body?.reason);
+  if (!reason) {
+    throw new HttpError(400, "Rejection reason is required");
+  }
+  return { id, reason };
 };

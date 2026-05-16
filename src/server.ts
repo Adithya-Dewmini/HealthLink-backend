@@ -81,6 +81,9 @@ app.use("/api/cart", cartRoutes);
 import orderRoutes from "./modules/orders/routes";
 app.use("/api/orders", orderRoutes);
 
+import paymentRoutes from "./routes/payment.routes";
+app.use("/api/payments", paymentRoutes);
+
 import notificationRoutes from "./modules/notifications/routes";
 app.use("/api/notifications", notificationRoutes);
 import activityRoutes from "./modules/activity/routes";
@@ -175,6 +178,9 @@ import {
 } from "./routes/dashboardBanner.routes";
 app.use("/api/admin", adminDashboardBannerRoutes);
 app.use("/api/patient", patientDashboardBannerRoutes);
+
+import chatbotRoutes from "./routes/chatbot.routes";
+app.use("/api/patient", chatbotRoutes);
 
 app.get("/", (req, res) => {
   res.send("HealthLink API running 🚀");

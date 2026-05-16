@@ -66,6 +66,9 @@ type DoctorClinicMembershipRow = {
   clinic_id: string;
   clinic_name: string;
   clinic_location: string | null;
+  image_url: string | null;
+  logo_url: string | null;
+  cover_image_url: string | null;
   status: DoctorRelationshipStatus;
 };
 
@@ -267,6 +270,9 @@ export const listDoctorClinics = async (doctorUserId: number) => {
         mc.id AS clinic_id,
         mc.name AS clinic_name,
         mc.address AS clinic_location,
+        mc.image_url,
+        mc.logo_url,
+        mc.cover_image_url,
         mcd.status
       FROM medical_center_doctors mcd
       JOIN medical_centers mc ON mc.id = mcd.medical_center_id
@@ -289,6 +295,9 @@ export const listDoctorClinics = async (doctorUserId: number) => {
       medical_center_id: row.clinic_id,
       name: row.clinic_name,
       location: row.clinic_location ?? undefined,
+      image_url: row.image_url ?? undefined,
+      logo_url: row.logo_url ?? undefined,
+      cover_image_url: row.cover_image_url ?? undefined,
     }));
 
   const pending = result.rows
@@ -298,6 +307,9 @@ export const listDoctorClinics = async (doctorUserId: number) => {
       medical_center_id: row.clinic_id,
       name: row.clinic_name,
       location: row.clinic_location ?? undefined,
+      image_url: row.image_url ?? undefined,
+      logo_url: row.logo_url ?? undefined,
+      cover_image_url: row.cover_image_url ?? undefined,
     }));
 
   return { active, pending };

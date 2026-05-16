@@ -105,12 +105,15 @@ export const listDoctorPrescriptions = async (
         c.patient_id,
         COALESCE(c.created_at, p.issued_at) AS consultation_created_at,
         pu.name AS patient_name,
+        pu.profile_image AS patient_profile_image,
         CASE
           WHEN pp.dob IS NULL THEN NULL
           ELSE DATE_PART('year', AGE(pp.dob))::int
         END AS patient_age,
         pp.gender AS patient_gender,
         mc.name AS medical_center_name,
+        mc.logo_url AS medical_center_logo_url,
+        mc.cover_image_url AS medical_center_cover_image_url,
         COUNT(pi.id)::int AS medicine_count
       FROM prescriptions p
       JOIN consultations c
@@ -135,9 +138,12 @@ export const listDoctorPrescriptions = async (
         c.patient_id,
         c.created_at,
         pu.name,
+        pu.profile_image,
         pp.dob,
         pp.gender,
-        mc.name
+        mc.name,
+        mc.logo_url,
+        mc.cover_image_url
       ORDER BY COALESCE(p.issued_at, c.created_at) DESC
       LIMIT ${limitParam}
       OFFSET ${offsetParam}
@@ -155,11 +161,14 @@ export const listDoctorPrescriptions = async (
         name: row.patient_name ?? "Patient",
         age: typeof row.patient_age === "number" ? row.patient_age : null,
         gender: row.patient_gender ?? null,
+        profile_image: row.patient_profile_image ?? null,
       },
       medicalCenter: row.medical_center_id
         ? {
             id: String(row.medical_center_id),
             name: row.medical_center_name ?? "Medical Center",
+            logo_url: row.medical_center_logo_url ?? null,
+            cover_image_url: row.medical_center_cover_image_url ?? null,
           }
         : null,
       issuedAt: row.issued_at ?? row.consultation_created_at ?? null,
@@ -200,9 +209,13 @@ export const getDoctorPrescriptionDetail = async (
           ELSE DATE_PART('year', AGE(pp.dob))::int
         END AS patient_age,
         pp.gender AS patient_gender,
+        pu.profile_image AS patient_profile_image,
         du.name AS doctor_name,
+        du.profile_image AS doctor_profile_image,
         COALESCE(d.specialization, 'General Physician') AS doctor_specialization,
         mc.name AS medical_center_name,
+        mc.logo_url AS medical_center_logo_url,
+        mc.cover_image_url AS medical_center_cover_image_url,
         dispensed_user.name AS dispensed_by_name
       FROM prescriptions p
       JOIN consultations c
@@ -276,16 +289,20 @@ export const getDoctorPrescriptionDetail = async (
       name: row.patient_name ?? "Patient",
       age: typeof row.patient_age === "number" ? row.patient_age : null,
       gender: row.patient_gender ?? null,
+      profile_image: row.patient_profile_image ?? null,
     },
     doctor: {
       id: row.doctor_id ? String(row.doctor_id) : String(doctorUserId),
       name: row.doctor_name ?? "Doctor",
       specialization: row.doctor_specialization ?? "General Physician",
+      profile_image: row.doctor_profile_image ?? null,
     },
     medicalCenter: row.medical_center_id
       ? {
           id: String(row.medical_center_id),
           name: row.medical_center_name ?? "Medical Center",
+          logo_url: row.medical_center_logo_url ?? null,
+          cover_image_url: row.medical_center_cover_image_url ?? null,
         }
       : null,
     consultation: {

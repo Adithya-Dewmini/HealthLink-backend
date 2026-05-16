@@ -397,10 +397,17 @@ export const getDoctorDashboardData = async (userId: number) => {
   };
 };
 
-export const getDoctorQueueDashboardData = async (userId: number) => {
+export const getDoctorQueueDashboardData = async (
+  userId: number,
+  options?: { scheduleId?: string }
+) => {
   const doctorId = await requireDoctorId(userId);
   if (!doctorId) {
     throw createStatusError("Doctor profile not found", 404);
+  }
+  const requestedScheduleId = options?.scheduleId ? Number(options.scheduleId) : null;
+  if (options?.scheduleId && !requestedScheduleId) {
+    throw createStatusError("Invalid scheduleId", 400);
   }
 
   const avgConsultResult = await pool.query<{ avg_minutes: string | number | null }>(
@@ -423,81 +430,155 @@ export const getDoctorQueueDashboardData = async (userId: number) => {
   const averageConsultationMinutes =
     Number(avgConsultResult.rows[0]?.avg_minutes ?? 0) || 10;
 
-  const activeShiftId = await getActiveShiftId(doctorId);
+  const selectedScheduleResult =
+    requestedScheduleId !== null
+      ? await pool.query<{
+          id: number;
+          medical_center_id: string | null;
+          medical_center_name: string | null;
+          location: string | null;
+          cover_image_url: string | null;
+          logo_url: string | null;
+          date: string;
+          start_time: string | null;
+          end_time: string | null;
+        }>(
+          `
+          SELECT
+            s.id,
+            s.medical_center_id,
+            mc.name AS medical_center_name,
+            COALESCE(mc.address, mc.city) AS location,
+            mc.cover_image_url,
+            mc.logo_url,
+            s.date::text AS date,
+            s.start_time::text AS start_time,
+            s.end_time::text AS end_time
+          FROM medical_center_doctor_schedule s
+          JOIN medical_centers mc ON mc.id = s.medical_center_id
+          WHERE s.id = $1
+            AND s.doctor_profile_id = $2
+          LIMIT 1
+          `,
+          [requestedScheduleId, doctorId]
+        )
+      : null;
+
+  if (requestedScheduleId !== null && !selectedScheduleResult?.rows[0]) {
+    throw createStatusError("Clinic session not found for this doctor", 404);
+  }
+
   const queueResult = await pool.query(
     `
-    SELECT * FROM queues
+    SELECT *
+    FROM queues
     WHERE doctor_id = $1
       AND shift_date = ${APP_DATE_SQL}
-      AND ($2::int IS NULL OR shift_id = $2)
-    ORDER BY created_at DESC
+      AND ($2::int IS NULL OR schedule_id = $2)
+    ORDER BY
+      CASE WHEN status IN ('LIVE', 'PAUSED') THEN 0 ELSE 1 END,
+      created_at DESC
     LIMIT 1
     `,
-    [doctorId, activeShiftId]
+    [doctorId, requestedScheduleId]
   );
 
   if (queueResult.rows.length === 0) {
-    const bookingsResult = await pool.query(
-      `
-      SELECT
-        b.id,
-        b.patient_id,
-        b.time,
-        b.created_at,
-        u.name
-      FROM bookings b
-      JOIN users u ON b.patient_id = u.id
-      WHERE b.doctor_id = $1 AND b.date = ${APP_DATE_SQL}
-      ORDER BY b.time ASC
-      `,
-      [doctorId]
-    );
-
-    const patientsFromBookings = bookingsResult.rows.map((row, idx) => ({
-      id: row.id,
-      patient_id: row.patient_id,
-      token_number: idx + 1,
-      created_at: row.created_at,
-      status: "BOOKED",
-      name: row.name,
-    }));
-
+    const selectedSchedule = selectedScheduleResult?.rows[0] ?? null;
     return {
       doctor: { id: doctorId },
-      queue: null,
-      waitingCount: patientsFromBookings.length,
+      queue: selectedSchedule
+        ? {
+            id: null,
+            status: "NOT_STARTED",
+            waitingCount: 0,
+            completedCount: 0,
+            sessionId: selectedSchedule.id,
+            medicalCenterId: selectedSchedule.medical_center_id,
+            medicalCenterName: selectedSchedule.medical_center_name,
+            sessionDate: selectedSchedule.date,
+            sessionStart: selectedSchedule.start_time,
+            sessionEnd: selectedSchedule.end_time,
+            location: selectedSchedule.location,
+            cover_image_url: selectedSchedule.cover_image_url,
+            logo_url: selectedSchedule.logo_url,
+          }
+        : null,
+      waitingCount: 0,
       currentPatient: null,
-      patients: patientsFromBookings,
+      patients: [],
       averageConsultationMinutes,
     };
   }
 
   const queue = queueResult.rows[0];
+  const queueContextResult = await pool.query<{
+    medical_center_name: string | null;
+    location: string | null;
+    cover_image_url: string | null;
+    logo_url: string | null;
+    session_date: string | null;
+    session_start: string | null;
+    session_end: string | null;
+  }>(
+    `
+    SELECT
+      mc.name AS medical_center_name,
+      COALESCE(mc.address, mc.city) AS location,
+      mc.cover_image_url,
+      mc.logo_url,
+      s.date::text AS session_date,
+      s.start_time::text AS session_start,
+      s.end_time::text AS session_end
+    FROM queues q
+    LEFT JOIN medical_center_doctor_schedule s ON s.id = q.schedule_id
+    LEFT JOIN medical_centers mc ON mc.id = COALESCE(q.medical_center_id, s.medical_center_id)
+    WHERE q.id = $1
+    LIMIT 1
+    `,
+    [queue.id]
+  );
+  const queueContext = queueContextResult.rows[0] ?? null;
 
   if (queue.status === "LIVE" || queue.status === "PAUSED") {
-    const shiftWindow = await pool.query<{ start_time: string | null; end_time: string | null }>(
-      `
-      SELECT start_time, end_time
-      FROM doctor_availability
-      WHERE id = $1
-      `,
-      [queue.shift_id]
-    );
+    const scheduleWindow = queue.schedule_id
+      ? await pool.query<{ start_time: string | null; end_time: string | null }>(
+          `
+          SELECT start_time::text, end_time::text
+          FROM medical_center_doctor_schedule
+          WHERE id = $1
+          `,
+          [queue.schedule_id]
+        )
+      : null;
+    const shiftWindow = queue.shift_id
+      ? await pool.query<{ start_time: string | null; end_time: string | null }>(
+          `
+          SELECT start_time::text, end_time::text
+          FROM doctor_availability
+          WHERE id = $1
+          `,
+          [queue.shift_id]
+        )
+      : null;
 
-    const shiftStart = shiftWindow.rows[0]?.start_time ?? null;
-    const shiftEnd = shiftWindow.rows[0]?.end_time ?? null;
+    const shiftStart = scheduleWindow?.rows[0]?.start_time ?? shiftWindow?.rows[0]?.start_time ?? null;
+    const shiftEnd = scheduleWindow?.rows[0]?.end_time ?? shiftWindow?.rows[0]?.end_time ?? null;
 
     await pool.query(
       `
-      INSERT INTO queue_patients (queue_id, doctor_id, patient_id, token_number, status)
+      INSERT INTO queue_patients (queue_id, doctor_id, patient_id, token_number, status, medical_center_id)
       SELECT
         $1,
         $2,
         b.patient_id,
         ROW_NUMBER() OVER (ORDER BY b.time ASC),
-        'WAITING'
+        'WAITING',
+        $5
       FROM bookings b
       WHERE b.doctor_id = $2 AND b.date = ${APP_DATE_SQL}
+        AND ($6::int IS NULL OR b.session_id = $6)
+        AND ($5::uuid IS NULL OR b.medical_center_id = $5::uuid)
         AND ($3::time IS NULL OR b.time >= $3)
         AND ($4::time IS NULL OR b.time <= $4)
       AND NOT EXISTS (
@@ -505,7 +586,7 @@ export const getDoctorQueueDashboardData = async (userId: number) => {
         WHERE qp.queue_id = $1 AND qp.patient_id = b.patient_id
       )
       `,
-      [queue.id, doctorId, shiftStart, shiftEnd]
+      [queue.id, doctorId, shiftStart, shiftEnd, queue.medical_center_id ?? null, queue.schedule_id ?? null]
     );
   }
 
@@ -513,7 +594,8 @@ export const getDoctorQueueDashboardData = async (userId: number) => {
     `
     SELECT
       qp.*,
-      u.name
+      u.name,
+      u.profile_image
     FROM queue_patients qp
     JOIN users u ON qp.patient_id = u.id
     WHERE qp.queue_id = $1
@@ -535,12 +617,22 @@ export const getDoctorQueueDashboardData = async (userId: number) => {
   );
 
   const waitingCount = Number(waitingCountResult.rows[0]?.waiting_count ?? 0);
+  const completedCountResult = await pool.query<{ completed_count: string | number }>(
+    `
+    SELECT COUNT(*) AS completed_count
+    FROM queue_patients
+    WHERE queue_id = $1 AND status = 'COMPLETED'
+    `,
+    [queue.id]
+  );
+  const completedCount = Number(completedCountResult.rows[0]?.completed_count ?? 0);
 
   const currentPatientResult = await pool.query(
     `
     SELECT
       qp.*,
-      u.name
+      u.name,
+      u.profile_image
     FROM queue_patients qp
     JOIN users u ON qp.patient_id = u.id
     WHERE qp.queue_id = $1
@@ -581,6 +673,16 @@ export const getDoctorQueueDashboardData = async (userId: number) => {
       startedAt: queue.started_at,
       waitingCount,
       estimatedWaitMinutes,
+      sessionId: queue.schedule_id ?? null,
+      medicalCenterId: queue.medical_center_id ?? null,
+      medicalCenterName: queueContext?.medical_center_name ?? null,
+      sessionDate: queueContext?.session_date ?? null,
+      sessionStart: queueContext?.session_start ?? null,
+      sessionEnd: queueContext?.session_end ?? null,
+      location: queueContext?.location ?? null,
+      cover_image_url: queueContext?.cover_image_url ?? null,
+      logo_url: queueContext?.logo_url ?? null,
+      completedCount,
     },
     currentPatient,
     patients: patientsWithEstimate,
