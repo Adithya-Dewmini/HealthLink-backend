@@ -4,12 +4,11 @@ import { env } from "../config/env";
 import { createAuditLogWithClient } from "./audit.service";
 import { io } from "../server";
 import QRCode from "qrcode";
-import jwt from "jsonwebtoken";
 import { filterExpoTokens, sendExpoPush } from "../utils/expoPush";
 import { BOOKING_STATUS, updateNearestBookingStatus } from "../utils/bookingLifecycle";
 import { SOCKET_EVENTS, logRealtimeEmit } from "./realtime.service";
+import { createPrescriptionQrToken } from "./prescription.service";
 
-const QR_SECRET = env.jwtSecret;
 const doctorRoom = (doctorId: number | string) => `doctor-${doctorId}`;
 const receptionRoom = "reception";
 
@@ -630,14 +629,10 @@ export const completeConsultationRecord = async (consultationId: string, userId:
     );
 
     const prescriptionId = prescriptionResult.rows[0].id;
-    const token = jwt.sign(
-      {
-        prescriptionId,
-        patientId: consultation.patient_id,
-      },
-      QR_SECRET,
-      { expiresIn: "2h" }
-    );
+    const token = createPrescriptionQrToken({
+      prescriptionId,
+      patientId: consultation.patient_id,
+    });
     const qrData = `https://healthlink.app/prescription/${token}`;
     const qrImage = await QRCode.toDataURL(qrData);
 
