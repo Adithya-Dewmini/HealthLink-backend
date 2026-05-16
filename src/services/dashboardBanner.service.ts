@@ -2,6 +2,7 @@ import type { Request } from "express";
 import pool from "../config/db";
 import { getCloudinary } from "../config/cloudinary";
 import { env } from "../config/env";
+import type { UploadedFile } from "../types/uploads";
 
 export type DashboardBannerTargetType =
   | "none"
@@ -89,7 +90,7 @@ const getPublicBaseUrl = (req: Request) => {
   return host ? `${req.protocol}://${host}` : "";
 };
 
-const uploadBannerImage = async (file: Express.Multer.File) => {
+const uploadBannerImage = async (file: UploadedFile) => {
   if (!hasCloudinaryConfig()) {
     throw new Error("Cloudinary is not configured");
   }
@@ -128,7 +129,7 @@ const uploadBannerImage = async (file: Express.Multer.File) => {
   });
 };
 
-export const uploadDashboardBannerImage = async (_req: Request, file: Express.Multer.File) =>
+export const uploadDashboardBannerImage = async (_req: Request, file: UploadedFile) =>
   uploadBannerImage(file);
 
 export const listAdminDashboardBanners = async () => {

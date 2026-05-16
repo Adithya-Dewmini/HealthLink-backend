@@ -19,6 +19,32 @@ import type {
 } from "./validation";
 
 type DbRecord = Record<string, any>;
+type PrescriptionItemRow = {
+  prescription_item_id: number | string;
+  medicine_name: string | null;
+  required_quantity: number | string | null;
+  dispensed_quantity: number | string | null;
+  dosage: string | null;
+  frequency: string | null;
+  duration: string | null;
+  instructions: string | null;
+  medicine_id: number | string | null;
+  avg_price: number | string | null;
+};
+type DemandCountRow = {
+  medicine_id: number | string;
+  demand_count: number | string | null;
+};
+type MedicineDetailRow = {
+  id: number | string;
+  name: string | null;
+  avg_price: number | string | null;
+};
+type InventoryRow = {
+  medicine_id: number | string;
+  stock: number | string | null;
+  unit_price?: number | string | null;
+};
 
 const normalizeMoney = (value: number) => Number(value.toFixed(2));
 const normalizeDbId = (value: unknown) =>
@@ -82,7 +108,7 @@ const getPrescriptionItems = async (
   prescriptionItemIds: number[]
 ) => {
   await ensurePrescriptionItemDispenseColumns(client);
-  const query = await client.query(
+  const query = await client.query<PrescriptionItemRow>(
     `
       SELECT
         pi.id AS prescription_item_id,
@@ -104,7 +130,9 @@ const getPrescriptionItems = async (
     [prescriptionId, prescriptionItemIds]
   );
 
-  return new Map(query.rows.map((row) => [Number(row.prescription_item_id), row]));
+  return new Map<number, PrescriptionItemRow>(
+    query.rows.map((row) => [Number(row.prescription_item_id), row])
+  );
 };
 
 const getDemandCountsByMedicine = async (
@@ -122,7 +150,7 @@ const getDemandCountsByMedicine = async (
       whereParts.push(`${quoteIdent(demandLogs.pharmacyCol)} = $${values.length}`);
     }
 
-    const result = await client.query(
+    const result = await client.query<DemandCountRow>(
       `
         SELECT
           ${quoteIdent(demandLogs.medicineCol)} AS medicine_id,
@@ -134,7 +162,7 @@ const getDemandCountsByMedicine = async (
       values
     );
 
-    return new Map(
+    return new Map<number, number>(
       result.rows.map((row) => [Number(row.medicine_id), Number(row.demand_count ?? 0)])
     );
   } catch {
@@ -295,11 +323,11 @@ const recordDemandLogs = async (
 
 const getMedicineDetails = async (client: PoolClient, medicineIds: number[]) => {
   if (!medicineIds.length) return new Map<number, DbRecord>();
-  const query = await client.query(
+  const query = await client.query<MedicineDetailRow>(
     `SELECT id, name, avg_price FROM medicines WHERE id = ANY($1::int[])`,
     [medicineIds]
   );
-  return new Map(query.rows.map((row) => [Number(row.id), row]));
+  return new Map<number, MedicineDetailRow>(query.rows.map((row) => [Number(row.id), row]));
 };
 
 const getInventoryRows = async (client: PoolClient, pharmacyId: unknown, medicineIds: number[], lock = false) => {
@@ -308,7 +336,7 @@ const getInventoryRows = async (client: PoolClient, pharmacyId: unknown, medicin
     return { config: inventory, rows: new Map<number, DbRecord>() };
   }
 
-  const query = await client.query(
+  const query = await client.query<InventoryRow>(
     `
       SELECT
         ${quoteIdent(inventory.medicineCol)} AS medicine_id,
@@ -324,7 +352,7 @@ const getInventoryRows = async (client: PoolClient, pharmacyId: unknown, medicin
 
   return {
     config: inventory,
-    rows: new Map(query.rows.map((row) => [Number(row.medicine_id), row])),
+    rows: new Map<number, InventoryRow>(query.rows.map((row) => [Number(row.medicine_id), row])),
   };
 };
 
@@ -589,7 +617,7 @@ export const fetchPrescriptionByQr = async (qrToken: string, pharmacyId: string 
   let inventoryRows = new Map<number, DbRecord>();
 
   if (pharmacyId) {
-    const medicineIds = rows
+    const medicineIds: number[] = rows
       .map((row) => (row.medicine_id ? Number(row.medicine_id) : null))
       .filter((value): value is number => Number.isInteger(value));
 
@@ -1195,7 +1223,7 @@ export const dispensePrescription = async (input: {
     }
 
     const medicineIds = Array.from(
-      new Set(
+      new Set<number>(
         Array.from(itemMap.values())
           .map((row) => (row.medicine_id ? Number(row.medicine_id) : null))
           .filter((value): value is number => Number.isInteger(value))
@@ -1567,7 +1595,7 @@ export const createSale = async (input: {
       ? await getPrescriptionItems(client, input.prescriptionId, prescriptionItemIds)
       : new Map<number, DbRecord>();
     const medicineIds = Array.from(
-      new Set(
+      new Set<number>(
         input.items
           .map((item) => item.medicineId || itemMap.get(item.prescriptionItemId as number)?.medicine_id)
           .filter((value): value is number => Number.isInteger(Number(value)))

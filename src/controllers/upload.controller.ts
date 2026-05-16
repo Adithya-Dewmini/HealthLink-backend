@@ -6,6 +6,7 @@ import pool from "../config/db";
 import { getCloudinary } from "../config/cloudinary";
 import { env } from "../config/env";
 import { analyzePrescriptionImage } from "../services/upload.service";
+import type { UploadedFile } from "../types/uploads";
 import type { AuthenticatedRequest } from "../types/auth";
 
 const LOCAL_IMAGE_UPLOAD_DIR = path.resolve(process.cwd(), "uploads", "images");
@@ -13,7 +14,7 @@ const LOCAL_IMAGE_UPLOAD_DIR = path.resolve(process.cwd(), "uploads", "images");
 const hasCloudinaryConfig = () =>
   Boolean(env.cloudinaryName && env.cloudinaryKey && env.cloudinarySecret);
 
-const getFileExtension = (file: Express.Multer.File) => {
+const getFileExtension = (file: UploadedFile) => {
   const originalExtension = path.extname(file.originalname || "").trim();
   if (originalExtension) {
     return originalExtension.toLowerCase();
@@ -44,7 +45,7 @@ const toPublicFileUrl = (req: Request, relativePath: string) => {
   return `${baseUrl}${relativePath.startsWith("/") ? relativePath : `/${relativePath}`}`;
 };
 
-const uploadImageToCloudinary = async (file: Express.Multer.File, folder: string) => {
+const uploadImageToCloudinary = async (file: UploadedFile, folder: string) => {
   const cloudinary = getCloudinary();
 
   return new Promise<{ secure_url: string; public_id: string }>((resolve, reject) => {
@@ -69,7 +70,7 @@ const uploadImageToCloudinary = async (file: Express.Multer.File, folder: string
   });
 };
 
-const uploadImageToLocalStorage = async (req: Request, file: Express.Multer.File) => {
+const uploadImageToLocalStorage = async (req: Request, file: UploadedFile) => {
   await fs.mkdir(LOCAL_IMAGE_UPLOAD_DIR, { recursive: true });
   const fileName = `${Date.now()}-${randomUUID()}${getFileExtension(file)}`;
   const destination = path.join(LOCAL_IMAGE_UPLOAD_DIR, fileName);
@@ -82,7 +83,7 @@ const uploadImageToLocalStorage = async (req: Request, file: Express.Multer.File
   };
 };
 
-const uploadImageBuffer = async (req: Request, file: Express.Multer.File, folder: string) => {
+const uploadImageBuffer = async (req: Request, file: UploadedFile, folder: string) => {
   if (hasCloudinaryConfig()) {
     return uploadImageToCloudinary(file, folder);
   }
@@ -176,8 +177,8 @@ const getUploadedFiles = (req: Request) => {
 
 const uploadEntityMedia = async (
   req: Request,
-  logoFile: Express.Multer.File | null,
-  coverFile: Express.Multer.File | null,
+  logoFile: UploadedFile | null,
+  coverFile: UploadedFile | null,
   folder: string
 ) => {
   const [logoUpload, coverUpload] = await Promise.all([

@@ -6,6 +6,7 @@ import pool from "../config/db";
 import { getCloudinary } from "../config/cloudinary";
 import { env } from "../config/env";
 import { createAuditLogWithClient } from "./audit.service";
+import type { UploadedFile } from "../types/uploads";
 import { hashPassword, signAuthToken } from "../utils/security";
 
 type AppError = Error & { statusCode?: number };
@@ -24,7 +25,7 @@ export type RegisterMedicalCenterWithVerificationInput = {
   adminEmail: string;
   password: string;
   specialties?: string[];
-  verificationDocument: Express.Multer.File;
+  verificationDocument: UploadedFile;
 };
 
 export type RegisterPharmacyWithVerificationInput = {
@@ -35,7 +36,7 @@ export type RegisterPharmacyWithVerificationInput = {
   ownerName: string;
   ownerEmail: string;
   password: string;
-  verificationDocument: Express.Multer.File;
+  verificationDocument: UploadedFile;
 };
 
 const LOCAL_UPLOAD_DIR = path.resolve(process.cwd(), "uploads", "verification-documents");
@@ -57,7 +58,7 @@ const normalizePhone = (value: unknown) =>
 const hasCloudinaryConfig = () =>
   Boolean(env.cloudinaryName && env.cloudinaryKey && env.cloudinarySecret);
 
-const getFileExtension = (file: Express.Multer.File) => {
+const getFileExtension = (file: UploadedFile) => {
   const originalExtension = path.extname(file.originalname || "").trim();
   if (originalExtension) {
     return originalExtension.toLowerCase();
@@ -79,7 +80,7 @@ const getFileExtension = (file: Express.Multer.File) => {
 };
 
 const uploadDocumentToLocalStorage = async (
-  file: Express.Multer.File,
+  file: UploadedFile,
   entityType: "medical_center" | "pharmacy"
 ): Promise<UploadedDocument> => {
   await fs.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
@@ -93,7 +94,7 @@ const uploadDocumentToLocalStorage = async (
 };
 
 const uploadDocumentToCloudinary = async (
-  file: Express.Multer.File,
+  file: UploadedFile,
   entityType: "medical_center" | "pharmacy"
 ): Promise<UploadedDocument> => {
   const cloudinary = getCloudinary();
@@ -120,7 +121,7 @@ const uploadDocumentToCloudinary = async (
 };
 
 const uploadDocument = async (
-  file: Express.Multer.File,
+  file: UploadedFile,
   entityType: "medical_center" | "pharmacy"
 ) => {
   if (hasCloudinaryConfig()) {

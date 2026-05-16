@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { env } from "../config/env";
+import type { UploadedFile } from "../types/uploads";
 
 const getGenAI = () => {
   if (!env.geminiApiKey) {
@@ -9,7 +10,7 @@ const getGenAI = () => {
   return new GoogleGenerativeAI(env.geminiApiKey);
 };
 
-export const analyzePrescriptionImage = async (file: Express.Multer.File) => {
+export const analyzePrescriptionImage = async (file: UploadedFile) => {
   const base64Image = file.buffer.toString("base64");
   const model = getGenAI().getGenerativeModel({
     model: "gemini-2.5-flash",

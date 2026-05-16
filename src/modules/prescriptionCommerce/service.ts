@@ -12,6 +12,19 @@ import type {
 } from "./types";
 
 type DbRecord = Record<string, any>;
+type PrescriptionCommerceItemRow = {
+  prescription_item_id: number | string;
+  medicine_id: number | string | null;
+  medicine_name: string | null;
+  required_quantity: number | string | null;
+  dispensed_quantity: number | string | null;
+};
+type PrescriptionCommerceRow = {
+  id: string | number;
+  status: string | null;
+  dispensed_at: string | Date | null;
+  patient_id: string | number;
+};
 
 const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2));
 
@@ -75,7 +88,7 @@ const getPrescriptionForPatient = async (
   prescriptionId: string,
   patientId: number
 ) => {
-  const result = await client.query(
+  const result = await client.query<PrescriptionCommerceRow>(
     `
       SELECT
         p.id,
@@ -122,7 +135,7 @@ const assertNoActivePrescriptionOrder = async (client: PoolClient, prescriptionI
 };
 
 const getPrescriptionItems = async (client: PoolClient, prescriptionId: string) => {
-  const result = await client.query(
+  const result = await client.query<PrescriptionCommerceItemRow>(
     `
       SELECT
         pi.id AS prescription_item_id,
@@ -347,11 +360,17 @@ export const buildPrescriptionCartMatches = async (
     await getPrescriptionForPatient(client, prescriptionId, patientId);
     await assertNoActivePrescriptionOrder(client, prescriptionId);
     const items = await getPrescriptionItems(client, prescriptionId);
-    const medicineIds = Array.from(
-      new Set(items.map((item) => item.medicineId).filter((value): value is number => Number.isInteger(value)))
+    const medicineIds: number[] = Array.from(
+      new Set<number>(
+        items.map((item) => item.medicineId).filter((value): value is number => Number.isInteger(value))
+      )
     );
-    const medicineNames = Array.from(
-      new Set(items.map((item) => normalizeLookupName(item.medicineName)).filter(Boolean))
+    const medicineNames: string[] = Array.from(
+      new Set<string>(
+        items
+          .map((item) => normalizeLookupName(item.medicineName))
+          .filter((value): value is string => Boolean(value))
+      )
     );
     const rows = await getMarketplaceCoverageRows(client, medicineIds, medicineNames);
     return buildPharmacyMatches(prescriptionId, items, rows);
@@ -365,11 +384,17 @@ export const createPrescriptionLinkedOrder = async (
   withTransaction(async (client) => {
     await getPrescriptionForPatient(client, prescriptionId, patientId);
     const items = await getPrescriptionItems(client, prescriptionId);
-    const medicineIds = Array.from(
-      new Set(items.map((item) => item.medicineId).filter((value): value is number => Number.isInteger(value)))
+    const medicineIds: number[] = Array.from(
+      new Set<number>(
+        items.map((item) => item.medicineId).filter((value): value is number => Number.isInteger(value))
+      )
     );
-    const medicineNames = Array.from(
-      new Set(items.map((item) => normalizeLookupName(item.medicineName)).filter(Boolean))
+    const medicineNames: string[] = Array.from(
+      new Set<string>(
+        items
+          .map((item) => normalizeLookupName(item.medicineName))
+          .filter((value): value is string => Boolean(value))
+      )
     );
     const rows = await getMarketplaceCoverageRows(client, medicineIds, medicineNames, true);
     const matchPayload = buildPharmacyMatches(prescriptionId, items, rows);

@@ -40,6 +40,14 @@ type DoctorProfileRow = {
   languages: string | null;
   visibility: string | null;
 };
+type QueuePatientRow = {
+  id: number;
+  patient_id: number;
+  token_number: number;
+  status: string;
+  name: string;
+  profile_image: string | null;
+};
 
 const AVAILABILITY_DAY_ORDER_SQL = `
   CASE day
@@ -590,7 +598,7 @@ export const getDoctorQueueDashboardData = async (
     );
   }
 
-  const patientsResult = await pool.query(
+  const patientsResult = await pool.query<QueuePatientRow>(
     `
     SELECT
       qp.*,
@@ -627,7 +635,7 @@ export const getDoctorQueueDashboardData = async (
   );
   const completedCount = Number(completedCountResult.rows[0]?.completed_count ?? 0);
 
-  const currentPatientResult = await pool.query(
+  const currentPatientResult = await pool.query<QueuePatientRow>(
     `
     SELECT
       qp.*,
@@ -646,16 +654,18 @@ export const getDoctorQueueDashboardData = async (
 
   const waitingPatients = patients
     .filter((patient) => patient.status === "WAITING")
-    .sort((left, right) => left.token_number - right.token_number);
+    .sort((left, right) => Number(left.token_number) - Number(right.token_number));
 
-  const waitIndexById = new Map(waitingPatients.map((patient, idx) => [patient.id, idx]));
+  const waitIndexById = new Map<number, number>(
+    waitingPatients.map((patient, idx) => [Number(patient.id), idx])
+  );
 
   const patientsWithEstimate = patients.map((patient) => {
     if (patient.status !== "WAITING") {
       return { ...patient, estimatedWaitMinutes: 0, position: null };
     }
 
-    const indexAhead = waitIndexById.get(patient.id) ?? 0;
+    const indexAhead = waitIndexById.get(Number(patient.id)) ?? 0;
     return {
       ...patient,
       estimatedWaitMinutes: Math.round(indexAhead * averageConsultationMinutes),

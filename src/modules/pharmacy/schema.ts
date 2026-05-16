@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { HttpError } from "./errors";
 
 const tableColumnCache = new Map<string, Set<string>>();
+type ColumnRow = { column_name: string };
 
 export const quoteIdent = (value: string) => `"${value.replace(/"/g, "\"\"")}"`;
 
@@ -9,7 +10,7 @@ const readColumns = async (client: PoolClient, tableName: string) => {
   const cached = tableColumnCache.get(tableName);
   if (cached) return cached;
 
-  const result = await client.query(
+  const result = await client.query<ColumnRow>(
     `
       SELECT column_name
       FROM information_schema.columns
@@ -22,7 +23,7 @@ const readColumns = async (client: PoolClient, tableName: string) => {
     throw new HttpError(500, `Required table "${tableName}" does not exist`);
   }
 
-  const columns = new Set(result.rows.map((row) => String(row.column_name)));
+  const columns = new Set<string>(result.rows.map((row) => String(row.column_name)));
   tableColumnCache.set(tableName, columns);
   return columns;
 };

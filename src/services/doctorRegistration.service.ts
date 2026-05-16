@@ -6,6 +6,7 @@ import pool from "../config/db";
 import { getCloudinary } from "../config/cloudinary";
 import { env } from "../config/env";
 import { createAuditLogWithClient } from "./audit.service";
+import type { UploadedFile } from "../types/uploads";
 import { hashPassword } from "../utils/security";
 
 type AppError = Error & { statusCode?: number };
@@ -21,9 +22,9 @@ export type DoctorRegistrationInput = {
   experienceYears: number;
   workplace: string;
   password: string;
-  slmcCertificate: Express.Multer.File;
-  degreeCertificate: Express.Multer.File;
-  idProof: Express.Multer.File;
+  slmcCertificate: UploadedFile;
+  degreeCertificate: UploadedFile;
+  idProof: UploadedFile;
 };
 
 type UploadedDocument = {
@@ -76,7 +77,7 @@ const ensureValidInput = (input: DoctorRegistrationInput) => {
   }
 };
 
-const getFileExtension = (file: Express.Multer.File) => {
+const getFileExtension = (file: UploadedFile) => {
   const originalExtension = path.extname(file.originalname || "").trim();
   if (originalExtension) {
     return originalExtension.toLowerCase();
@@ -98,7 +99,7 @@ const getFileExtension = (file: Express.Multer.File) => {
 };
 
 const uploadDocumentToLocalStorage = async (
-  file: Express.Multer.File,
+  file: UploadedFile,
   documentType: string
 ): Promise<UploadedDocument> => {
   await fs.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
@@ -112,7 +113,7 @@ const uploadDocumentToLocalStorage = async (
 };
 
 const uploadDocumentToCloudinary = async (
-  file: Express.Multer.File,
+  file: UploadedFile,
   documentType: string
 ): Promise<UploadedDocument> => {
   const cloudinary = getCloudinary();
@@ -140,7 +141,7 @@ const uploadDocumentToCloudinary = async (
   });
 };
 
-const uploadDocument = async (file: Express.Multer.File, documentType: string) => {
+const uploadDocument = async (file: UploadedFile, documentType: string) => {
   if (hasCloudinaryConfig()) {
     return uploadDocumentToCloudinary(file, documentType);
   }
