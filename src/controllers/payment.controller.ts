@@ -204,6 +204,10 @@ export const getPayHereHostedCheckoutController = async (req: Request, res: Resp
     const html = await getHostedCheckoutHtml(paymentId, token);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self' https://sandbox.payhere.lk https://www.payhere.lk; base-uri 'self'; frame-ancestors 'none'"
+    );
     return res.status(200).send(html);
   } catch (error) {
     return handleError(res, error, "Failed to load hosted payment checkout");

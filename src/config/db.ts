@@ -33,19 +33,42 @@ const poolDebugTimer = setInterval(() => {
 
 poolDebugTimer.unref?.();
 
+const INIT_DB_ADVISORY_LOCK_KEY = 814205631;
+const INIT_DB_MAX_ATTEMPTS = 4;
+const INIT_DB_RETRY_DELAY_MS = 1500;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isRetryableInitDbError = (error: unknown) => {
+  const code = String((error as { code?: string } | undefined)?.code || "");
+  return code === "40P01" || code === "55P03";
+};
+
 export const verifyDbConnection = async () => {
   await pool.query("SELECT 1");
   console.log("✅ DB connected");
 };
 
-export const initDb = async () => {
+const initDbOnce = async () => {
   await verifyDbConnection();
   const client = await pool.connect();
+  let advisoryLockHeld = false;
+  let sessionTimeoutsConfigured = false;
 
   try {
-    // Fail fast if the DB is unreachable instead of hanging.
+    // Serialize schema bootstrap across concurrent app instances to avoid DDL deadlocks.
+    await client.query("SELECT pg_advisory_lock($1)", [INIT_DB_ADVISORY_LOCK_KEY]);
+    advisoryLockHeld = true;
+
+    // Fail fast if the DB is unreachable instead of hanging. Reset these before releasing
+    // the pooled client so the limits do not leak into normal request traffic.
     await client.query("SET statement_timeout = 10000");
-    await client.query("BEGIN");
+    await client.query("SET lock_timeout = 5000");
+    sessionTimeoutsConfigured = true;
+
+    // Keep bootstrap idempotent and autocommitted instead of holding one massive transaction.
+    // The previous transaction accumulated AccessExclusive locks across many tables, which made
+    // startup prone to deadlocks with ordinary read traffic on older tables.
     await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 
     await client.query(`
@@ -2635,14 +2658,32 @@ export const initDb = async () => {
       DO $$
       BEGIN
         IF to_regclass('public.queues') IS NOT NULL THEN
-          ALTER TABLE queues
-            ADD COLUMN IF NOT EXISTS medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE,
-            ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES doctor_availability(id) ON DELETE SET NULL,
-            ADD COLUMN IF NOT EXISTS schedule_id INTEGER REFERENCES medical_center_doctor_schedule(id) ON DELETE SET NULL,
-            ADD COLUMN IF NOT EXISTS shift_date DATE DEFAULT CURRENT_DATE,
-            ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW(),
-            ADD COLUMN IF NOT EXISTS started_at TIMESTAMP,
-            ADD COLUMN IF NOT EXISTS ended_at TIMESTAMP;
+          IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'queues'
+              AND column_name IN (
+                'medical_center_id',
+                'shift_id',
+                'schedule_id',
+                'shift_date',
+                'created_at',
+                'started_at',
+                'ended_at'
+              )
+            GROUP BY table_name
+            HAVING COUNT(*) < 7
+          ) THEN
+            ALTER TABLE queues
+              ADD COLUMN IF NOT EXISTS medical_center_id UUID REFERENCES medical_centers(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES doctor_availability(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS schedule_id INTEGER REFERENCES medical_center_doctor_schedule(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS shift_date DATE DEFAULT CURRENT_DATE,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS started_at TIMESTAMP,
+              ADD COLUMN IF NOT EXISTS ended_at TIMESTAMP;
+          END IF;
 
           IF to_regclass('public.unique_doctor_daily_queue') IS NOT NULL THEN
             DROP INDEX unique_doctor_daily_queue;
@@ -2764,17 +2805,53 @@ export const initDb = async () => {
       END $$;
     `);
 
-    await client.query("COMMIT");
     console.log("✅ PostgreSQL connected and schema ready");
   } catch (err) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {}
-    console.error("❌ DB initialization failed:", err);
+    if (!isRetryableInitDbError(err)) {
+      console.error("❌ DB initialization failed:", err);
+    }
     throw err;
   } finally {
+    if (sessionTimeoutsConfigured) {
+      try {
+        await client.query("RESET statement_timeout");
+        await client.query("RESET lock_timeout");
+      } catch (resetError) {
+        console.error("⚠️ Failed to reset DB init session settings:", resetError);
+      }
+    }
+    if (advisoryLockHeld) {
+      try {
+        await client.query("SELECT pg_advisory_unlock($1)", [INIT_DB_ADVISORY_LOCK_KEY]);
+      } catch (unlockError) {
+        console.error("⚠️ Failed to release DB init advisory lock:", unlockError);
+      }
+    }
     client.release();
   }
+};
+
+export const initDb = async () => {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= INIT_DB_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await initDbOnce();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableInitDbError(error) || attempt === INIT_DB_MAX_ATTEMPTS) {
+        throw error;
+      }
+
+      console.warn(
+        `⚠️ DB initialization attempt ${attempt} failed with a transient lock error. Retrying in ${INIT_DB_RETRY_DELAY_MS}ms...`
+      );
+      await sleep(INIT_DB_RETRY_DELAY_MS);
+    }
+  }
+
+  throw lastError;
 };
 
 export default pool;

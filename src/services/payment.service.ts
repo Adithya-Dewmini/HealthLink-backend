@@ -1100,9 +1100,42 @@ export const getHostedCheckoutHtml = async (
       <form id="payhere-form" method="post" action="${gatewayConfig.checkoutUrl}">
         ${hiddenInputs}
       </form>
+      <button id="manual-submit" type="submit" form="payhere-form" style="display:none;margin-top:16px;padding:12px 18px;border:none;border-radius:999px;background:#0f172a;color:#fff;font-weight:700;cursor:pointer;">Continue to payment</button>
       <noscript><button type="submit" form="payhere-form">Continue to payment</button></noscript>
     </div>
-    <script>document.getElementById("payhere-form")?.submit();</script>
+    <script>
+      (function () {
+        var form = document.getElementById("payhere-form");
+        var button = document.getElementById("manual-submit");
+        var submitted = false;
+
+        var submitForm = function () {
+          if (!form || submitted) return;
+          submitted = true;
+          try {
+            if (typeof form.requestSubmit === "function") {
+              form.requestSubmit();
+              return;
+            }
+          } catch (error) {}
+          form.submit();
+        };
+
+        if (document.readyState === "complete" || document.readyState === "interactive") {
+          setTimeout(submitForm, 50);
+        } else {
+          document.addEventListener("DOMContentLoaded", function () {
+            setTimeout(submitForm, 50);
+          }, { once: true });
+        }
+
+        setTimeout(function () {
+          if (!submitted && button) {
+            button.style.display = "inline-block";
+          }
+        }, 1500);
+      })();
+    </script>
   </body>
 </html>`;
   });

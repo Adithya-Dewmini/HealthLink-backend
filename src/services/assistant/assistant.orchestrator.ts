@@ -11,6 +11,7 @@ import {
   detectIntent,
   extractDatePreference,
   extractTimePreference,
+  isNegativeResponse,
   isPositiveConfirmation,
 } from "./assistant.intent";
 import { clearConversationState, getConversationState, updateConversationState } from "./assistant.memory";
@@ -151,6 +152,91 @@ const buildMedicineDoctorAction = (specialty?: string): AssistantAction => ({
     specialty: specialty || "General Physician",
   },
 });
+
+const BOOKING_FLOW_INTENTS = new Set<AssistantResponse["intent"]>([
+  "BOOK_APPOINTMENT",
+  "SEARCH_DOCTORS",
+  "SELECT_SESSION",
+  "CONFIRM_BOOKING",
+]);
+
+const buildStateExtracted = (state: ConversationState): AssistantExtractedEntities => ({
+  symptoms: state.pendingBooking?.symptoms?.length ? state.pendingBooking.symptoms : state.extracted?.symptoms,
+  specialty: state.pendingBooking?.specialty || state.extracted?.specialty,
+  preferredDate: state.pendingBooking?.preferredDate || state.extracted?.preferredDate,
+  preferredTime: state.pendingBooking?.preferredTime || state.extracted?.preferredTime,
+  doctorName: state.pendingBooking?.selectedDoctorName || state.extracted?.doctorName,
+  medicalCenterName: state.pendingBooking?.selectedMedicalCenterName || state.extracted?.medicalCenterName,
+  sessionId: state.pendingBooking?.selectedSessionId || state.extracted?.sessionId,
+  medicineName: state.extracted?.medicineName,
+  medicineCategory: state.extracted?.medicineCategory,
+  pharmacyName: state.extracted?.pharmacyName,
+  orderId: state.extracted?.orderId,
+  prescriptionId: state.extracted?.prescriptionId,
+  dosageForm: state.extracted?.dosageForm,
+  appointmentId: state.extracted?.appointmentId,
+});
+
+const hasBookingFollowUpSignals = (
+  extracted: AssistantExtractedEntities,
+  aiIntent?: AssistantResponse["intent"]
+) =>
+  Boolean(
+    extracted.specialty ||
+      extracted.preferredDate ||
+      extracted.preferredTime ||
+      extracted.doctorName ||
+      extracted.medicalCenterName ||
+      extracted.symptoms?.length ||
+      aiIntent === "BOOK_APPOINTMENT" ||
+      aiIntent === "SEARCH_DOCTORS"
+  );
+
+const shouldContinueBookingFlow = (state: ConversationState) =>
+  Boolean(state.pendingBooking) || BOOKING_FLOW_INTENTS.has(state.lastIntent ?? "UNKNOWN");
+
+const resolveIntent = (
+  detectedIntent: AssistantResponse["intent"],
+  state: ConversationState,
+  extracted: AssistantExtractedEntities,
+  aiIntent?: AssistantResponse["intent"]
+): AssistantResponse["intent"] => {
+  if (detectedIntent === "UNKNOWN" && aiIntent) {
+    return aiIntent;
+  }
+
+  if (
+    (detectedIntent === "UNKNOWN" || detectedIntent === "GENERAL_HEALTH_INFO") &&
+    shouldContinueBookingFlow(state) &&
+    hasBookingFollowUpSignals(extracted, aiIntent)
+  ) {
+    return "BOOK_APPOINTMENT";
+  }
+
+  return detectedIntent;
+};
+
+const buildQueueReply = (queue: Awaited<ReturnType<typeof getPatientQueueStatus>>) => {
+  if (!queue) {
+    return "You can check your current queue progress, token number, and waiting details from the queue screen.";
+  }
+
+  if (queue.patientStatus === "WITH_DOCTOR") {
+    return `You are currently with ${queue.doctorName} at ${queue.medicalCenterName}. Your token is ${queue.tokenNumber ?? "-"}.`;
+  }
+
+  const waitingContext =
+    typeof queue.waitingCount === "number" && queue.waitingCount > 0
+      ? ` There ${queue.waitingCount === 1 ? "is" : "are"} ${queue.waitingCount} waiting patient${
+          queue.waitingCount === 1 ? "" : "s"
+        } in this queue.`
+      : "";
+  const currentContext = queue.currentToken ? ` The current token is ${queue.currentToken}.` : "";
+
+  return `You are queued for ${queue.doctorName} at ${queue.medicalCenterName}. Your token is ${
+    queue.tokenNumber ?? "-"
+  }.${currentContext}${waitingContext}`;
+};
 
 const handleSelectSession = (
   context: AssistantRequestContext,
@@ -322,12 +408,26 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
     return buildEmergencyResponse(conversationId);
   }
 
-  const intent = detectIntent(normalized, context.actionPayload);
+  const detectedIntent = detectIntent(normalized, context.actionPayload);
   const ruleExtracted = buildBaseExtracted(normalized);
   const ai = await parseMessageWithAI(context, state);
-  const extracted = mergeExtracted(ruleExtracted, ai?.extracted);
+  const extracted = mergeExtracted(mergeExtracted(buildStateExtracted(state), ruleExtracted), ai?.extracted);
+  const intent = resolveIntent(detectedIntent, state, extracted, ai?.intent);
   const riskLevel =
     ai?.riskLevel || (intent === "GENERAL_HEALTH_INFO" || extracted.symptoms?.length ? classifyMedicalRisk(normalized) : "NONE");
+
+  if (!context.actionPayload && shouldContinueBookingFlow(state) && isNegativeResponse(normalized)) {
+    clearConversationState(context.patientId, conversationId);
+    return {
+      conversationId,
+      reply: "Okay, I cancelled the current booking flow. If you want, I can help you start again anytime.",
+      intent: "BOOK_APPOINTMENT",
+      riskLevel: "NONE",
+      extracted: {},
+      actions: [buildDoctorSearchAction({})],
+      suggestions: ["Book a doctor", "Show available doctors", "View my appointments"],
+    };
+  }
 
   if (intent === "SELECT_SESSION") {
     return handleSelectSession(context, conversationId, state);
@@ -466,9 +566,7 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
     updateConversationState(context.patientId, conversationId, { lastIntent: intent, extracted });
     return {
       conversationId,
-      reply: queue
-        ? `Your latest queue shows token ${queue.tokenNumber ?? "-"}.`
-        : "You can check your current queue progress, token number, and waiting details from the queue screen.",
+      reply: buildQueueReply(queue),
       intent,
       riskLevel: "NONE",
       extracted,
@@ -690,6 +788,10 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
 
   if (intent === "BOOK_APPOINTMENT" || intent === "SEARCH_DOCTORS") {
     if (!extracted.specialty) {
+      const followUpQuestion =
+        ai?.needsFollowUp && ai.followUpQuestion
+          ? ai.followUpQuestion
+          : "Sure. What symptoms are you having, or what type of doctor do you need?";
       updateConversationState(context.patientId, conversationId, {
         lastIntent: "BOOK_APPOINTMENT",
         extracted,
@@ -697,7 +799,7 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
       });
       return {
         conversationId,
-        reply: "Sure. What symptoms are you having, or what type of doctor do you need?",
+        reply: followUpQuestion,
         intent: "BOOK_APPOINTMENT",
         riskLevel: "NONE",
         extracted,
@@ -740,6 +842,19 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
             ]
           : [buildDoctorSearchAction(extracted)],
       suggestions: [`Find ${extracted.specialty}`, "Show available doctors", "View my appointments"],
+    };
+  }
+
+  if (intent === "UNKNOWN" && ai?.needsFollowUp && ai.followUpQuestion) {
+    updateConversationState(context.patientId, conversationId, { lastIntent: "UNKNOWN", extracted });
+    return {
+      conversationId,
+      reply: ai.followUpQuestion,
+      intent,
+      riskLevel: "NONE",
+      extracted,
+      actions: [{ type: "ASK_FOLLOW_UP", label: "Tell MediMate more" }],
+      suggestions: ["Book a doctor", "Search pharmacy", "Show my prescriptions"],
     };
   }
 

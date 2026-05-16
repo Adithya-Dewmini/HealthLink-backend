@@ -94,6 +94,23 @@ describe("chatbot service", () => {
     expect(response.extracted.preferredDate).toBeTruthy();
   });
 
+  it("booking follow-up keeps doctor-booking context across turns", async () => {
+    await buildPatientChatbotResponse("I want to book a doctor", {
+      patientId: "7",
+      conversationId: "booking-follow-up",
+    });
+
+    const response = await buildPatientChatbotResponse("dentist tomorrow evening", {
+      patientId: "7",
+      conversationId: "booking-follow-up",
+    });
+
+    expect(response.intent).toBe("BOOK_APPOINTMENT");
+    expect(response.extracted.specialty).toBe("Dentist");
+    expect(response.extracted.preferredTime).toBe("evening");
+    expect(response.extracted.preferredDate).toBeTruthy();
+  });
+
   it("emergency detected before booking", async () => {
     const response = await buildPatientChatbotResponse("There is chest pain and shortness of breath", {
       patientId: "7",
@@ -107,6 +124,29 @@ describe("chatbot service", () => {
     const response = await buildPatientChatbotResponse("What is my queue number?", { patientId: "7" });
     expect(response.intent).toBe("VIEW_QUEUE");
     expect(response.actions[0]?.type).toBe("OPEN_QUEUE");
+  });
+
+  it("queue reply includes richer queue context when available", async () => {
+    const queueSpy = vi.spyOn(assistantTools, "getPatientQueueStatus").mockResolvedValueOnce({
+      queueId: "91",
+      sessionId: "33",
+      queueStatus: "LIVE",
+      patientStatus: "WAITING",
+      tokenNumber: 18,
+      currentToken: 12,
+      waitingCount: 4,
+      doctorName: "Dr Silva",
+      medicalCenterName: "City Clinic",
+    });
+
+    const response = await buildPatientChatbotResponse("What is my queue number?", { patientId: "7" });
+
+    expect(response.reply).toContain("Dr Silva");
+    expect(response.reply).toContain("City Clinic");
+    expect(response.reply).toContain("18");
+    expect(response.reply).toContain("12");
+
+    queueSpy.mockRestore();
   });
 
   it("prescriptions returns OPEN_PRESCRIPTIONS", async () => {
@@ -182,6 +222,22 @@ describe("chatbot service", () => {
     expect(response.actions.some((action) => action.type === "OPEN_DOCTOR_SEARCH")).toBe(true);
 
     confirmSpy.mockRestore();
+  });
+
+  it("cancel clears a pending booking flow cleanly", async () => {
+    await buildPatientChatbotResponse("I want to book a doctor", {
+      patientId: "7",
+      conversationId: "cancel-booking-flow",
+    });
+
+    const response = await buildPatientChatbotResponse("cancel", {
+      patientId: "7",
+      conversationId: "cancel-booking-flow",
+    });
+
+    expect(response.intent).toBe("BOOK_APPOINTMENT");
+    expect(response.reply.toLowerCase()).toContain("cancelled");
+    expect(response.actions.some((action) => action.type === "OPEN_DOCTOR_SEARCH")).toBe(true);
   });
 
   it("AI disabled fallback still works", async () => {
