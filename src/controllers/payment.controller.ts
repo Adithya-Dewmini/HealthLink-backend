@@ -18,6 +18,7 @@ import {
   createNotificationAndPush,
   getPharmacyMemberUserIds,
 } from "../services/notification.service";
+import { HttpError } from "../modules/pharmacy/errors";
 
 const parseOrderId = (value: unknown, label = "order id") => {
   const parsed = Number(value);
@@ -58,6 +59,21 @@ const handleError = (res: Response, error: unknown, fallbackMessage: string) => 
     error instanceof Error ? error : Object.assign(new Error(fallbackMessage), { statusCode: 500 })
   );
   return res.status(formatted.statusCode).json(formatted.body);
+};
+
+const mapCheckoutSessionErrorForClient = (error: unknown) => {
+  const message = String((error as Error | undefined)?.message || "").toLowerCase();
+  const statusCode = Number((error as { statusCode?: number } | undefined)?.statusCode || 0);
+
+  if ([400, 401, 403, 409].includes(statusCode) && error instanceof Error) {
+    return error;
+  }
+
+  if (statusCode === 503 || message.includes("payment gateway is not configured")) {
+    return new HttpError(503, "Payment gateway is not configured");
+  }
+
+  return new HttpError(500, "Unable to complete checkout. Please try again.");
 };
 
 const notifyPaymentOutcome = async (input: {
@@ -142,7 +158,11 @@ export const createPharmacyOrderCheckoutController = async (
       fields: session.fields,
     });
   } catch (error) {
-    return handleError(res, error, "Failed to create payment checkout session");
+    return handleError(
+      res,
+      mapCheckoutSessionErrorForClient(error),
+      "Failed to create payment checkout session"
+    );
   }
 };
 

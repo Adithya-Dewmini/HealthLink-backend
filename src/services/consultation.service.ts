@@ -631,7 +631,10 @@ export const completeConsultationRecord = async (consultationId: string, userId:
     const prescriptionId = prescriptionResult.rows[0].id;
     const token = createPrescriptionQrToken({
       prescriptionId,
+      consultationId: consultation.id,
       patientId: consultation.patient_id,
+      doctorId: consultation.doctor_id,
+      medicalCenterId: consultation.medical_center_id ?? null,
     });
     const qrData = `https://healthlink.app/prescription/${token}`;
     const qrImage = await QRCode.toDataURL(qrData);

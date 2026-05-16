@@ -115,7 +115,12 @@ beforeEach(() => {
 describe("payment service", () => {
   it("reuses a pending checkout session for a payable pharmacy order", async () => {
     const client = createMockClient((sql) => {
-      if (sql.includes("FROM orders o") && sql.includes("WHERE o.id = $1") && sql.includes("FOR UPDATE")) {
+      if (
+        sql.includes("FROM orders o") &&
+        sql.includes("LEFT JOIN patient_profiles pp") &&
+        sql.includes("WHERE o.id = $1") &&
+        sql.includes("FOR UPDATE OF o")
+      ) {
         return { rows: [orderRow] };
       }
 
@@ -170,6 +175,50 @@ describe("payment service", () => {
     ).toBe(false);
   });
 
+  it("creates a pending payment row with matching placeholder count when no checkout session exists", async () => {
+    const client = createMockClient((sql, params) => {
+      if (
+        sql.includes("FROM orders o") &&
+        sql.includes("LEFT JOIN patient_profiles pp") &&
+        sql.includes("WHERE o.id = $1") &&
+        sql.includes("FOR UPDATE OF o")
+      ) {
+        return { rows: [orderRow] };
+      }
+
+      if (
+        sql.includes("SELECT id, gateway_order_id, amount, currency FROM payments") &&
+        sql.includes("status = 'pending'")
+      ) {
+        return { rows: [] };
+      }
+
+      if (sql.startsWith("INSERT INTO payments")) {
+        expect(params).toHaveLength(6);
+        return { rows: [{ id: 502 }] };
+      }
+
+      if (sql.startsWith("UPDATE orders SET status = 'pending_payment'")) {
+        return { rows: [] };
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    connectMock.mockResolvedValue(client);
+
+    const session = await createCheckoutSession(88, 7);
+
+    expect(session.paymentId).toBe(502);
+    expect(
+      client.query.mock.calls.some(
+        ([sql]) =>
+          String(sql).includes("LEFT JOIN patient_profiles pp") &&
+          String(sql).includes("FOR UPDATE OF o")
+      )
+    ).toBe(true);
+  });
+
   it("marks a payment as paid and creates a single invoice for a valid notify callback", async () => {
     let invoiceInserted = 0;
 
@@ -209,7 +258,12 @@ describe("payment service", () => {
         return { rows: [] };
       }
 
-      if (sql.includes("FROM orders o") && sql.includes("WHERE o.id = $1") && sql.includes("FOR UPDATE")) {
+      if (
+        sql.includes("FROM orders o") &&
+        sql.includes("LEFT JOIN patient_profiles pp") &&
+        sql.includes("WHERE o.id = $1") &&
+        sql.includes("FOR UPDATE OF o")
+      ) {
         return { rows: [orderRow] };
       }
 
@@ -529,7 +583,12 @@ describe("payment service", () => {
 
   it("rejects invoice access when the patient does not own the order", async () => {
     const client = createMockClient((sql) => {
-      if (sql.includes("FROM orders o") && sql.includes("WHERE o.id = $1") && sql.includes("FOR UPDATE")) {
+      if (
+        sql.includes("FROM orders o") &&
+        sql.includes("LEFT JOIN patient_profiles pp") &&
+        sql.includes("WHERE o.id = $1") &&
+        sql.includes("FOR UPDATE OF o")
+      ) {
         return { rows: [orderRow] };
       }
 

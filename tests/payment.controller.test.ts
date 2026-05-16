@@ -78,6 +78,29 @@ describe("payment controller", () => {
     );
   });
 
+  it("hides raw database errors from the checkout session response", async () => {
+    vi.mocked(createCheckoutSession).mockRejectedValue(
+      Object.assign(new Error("FOR UPDATE cannot be applied to the nullable side of an outer join"), {
+        code: "0A000",
+      })
+    );
+
+    const req = createMockRequest({
+      params: { orderId: "88" },
+      user: { id: 7, role: "patient" },
+    });
+    const res = createMockResponse();
+
+    await createPharmacyOrderCheckoutController(req as any, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        message: "Unable to complete checkout. Please try again.",
+      })
+    );
+  });
+
   it("processes a successful PayHere notification and emits realtime updates", async () => {
     vi.mocked(updatePaymentFromGatewayNotification).mockResolvedValue({
       processed: true,

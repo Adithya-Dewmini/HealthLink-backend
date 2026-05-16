@@ -14,11 +14,15 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
   const baseQuery = `
     SELECT
       p.id,
+      p.consultation_id,
+      COALESCE(p.medical_center_id, c.medical_center_id) AS medical_center_id,
       p.qr_code,
       COALESCE(p.is_seen, false) AS is_seen,
       COALESCE(p.issued_at, c.created_at) AS issued_at,
       p.dispensed_at AS dispensed_at,
       c.created_at,
+      c.patient_id,
+      c.doctor_id,
       mc.name AS medical_center_name,
       du.name AS doctor_name,
       COALESCE(d.specialization, 'General') AS doctor_specialization,
@@ -43,7 +47,20 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
     WHERE c.patient_id = $1
       AND c.status = 'completed'
     ${latestFilter}
-    GROUP BY p.id, p.qr_code, p.is_seen, p.issued_at, p.dispensed_at, c.created_at, mc.name, du.name, d.specialization
+    GROUP BY
+      p.id,
+      p.consultation_id,
+      COALESCE(p.medical_center_id, c.medical_center_id),
+      p.qr_code,
+      p.is_seen,
+      p.issued_at,
+      p.dispensed_at,
+      c.created_at,
+      c.patient_id,
+      c.doctor_id,
+      mc.name,
+      du.name,
+      d.specialization
   `;
 
   const result = latest
@@ -52,6 +69,10 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
 
   const rows = result.rows.map((row: any) => ({
     id: row.id,
+    consultation_id: row.consultation_id ?? null,
+    patient_id: row.patient_id ?? null,
+    doctor_id: row.doctor_id ?? null,
+    medical_center_id: row.medical_center_id ?? null,
     qrToken: row.qr_code,
     doctor: {
       name: row.doctor_name ?? "Doctor",
@@ -69,6 +90,10 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
   if (latest && rows[0]?.id) {
     const qrState = await ensurePrescriptionQrToken(pool, {
       prescriptionId: rows[0].id,
+      consultationId: rows[0].consultation_id ?? null,
+      patientId: rows[0].patient_id ?? null,
+      doctorId: rows[0].doctor_id ?? null,
+      medicalCenterId: rows[0].medical_center_id ?? null,
       qrCode: rows[0].qrToken ?? null,
       isDispensed: Boolean(rows[0].dispensedAt),
     });

@@ -149,8 +149,8 @@ export const scanPrescriptionForOrderController = async (req: Request, res: Resp
     const pharmacistUserId = await requireVerifiedPharmacist(req);
     const qrToken = validatePrescriptionRouteId(req.params.qrToken);
     const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
-    await verifyPrescriptionToken(qrToken);
-    const data = await fetchPrescriptionByQr(qrToken, String(pharmacy.id));
+    const verification = await verifyPrescriptionToken(qrToken);
+    const data = await fetchPrescriptionByQr(qrToken, String(pharmacy.id), verification.prescriptionId);
     const activeOrder = await getActivePrescriptionOrder(String(data.prescription.id), Number(pharmacy.id));
     return res.status(200).json({
       ...data,

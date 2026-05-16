@@ -44,6 +44,34 @@ const handleError = (res: Response, error: unknown, fallbackMessage: string) => 
   return res.status(formatted.statusCode).json(formatted.body);
 };
 
+const mapCheckoutErrorForClient = (error: unknown) => {
+  const message = String((error as Error | undefined)?.message || "").toLowerCase();
+  const statusCode = Number((error as { statusCode?: number } | undefined)?.statusCode || 0);
+
+  if ([400, 401, 403].includes(statusCode) && isHttpError(error)) {
+    return error as HttpError;
+  }
+
+  if (statusCode === 503 || message.includes("payment gateway is not configured")) {
+    return new HttpError(503, "Payment gateway is not configured");
+  }
+
+  if (
+    statusCode === 409 &&
+    (
+      message.includes("stock") ||
+      message.includes("not available") ||
+      message.includes("cart is empty") ||
+      message.includes("product") ||
+      message.includes("pharmacy storefront")
+    )
+  ) {
+    return new HttpError(409, "Some medicines are no longer available.");
+  }
+
+  return new HttpError(500, "Unable to complete checkout. Please try again.");
+};
+
 const requirePatientUser = (req: Request) => {
   const typedReq = req as AuthenticatedRequest;
   const userId = typedReq.user?.id;
@@ -289,7 +317,7 @@ export const checkoutController = async (req: Request, res: Response) => {
     });
     return res.status(201).json(data);
   } catch (error) {
-    return handleError(res, error, "Failed to complete checkout");
+    return handleError(res, mapCheckoutErrorForClient(error), "Failed to complete checkout");
   }
 };
 

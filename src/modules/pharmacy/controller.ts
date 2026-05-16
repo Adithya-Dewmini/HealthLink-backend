@@ -85,8 +85,8 @@ export const getPrescriptionByQrController = async (req: Request, res: Response)
     const pharmacistUserId = await requireVerifiedPharmacistUser(req);
     const qrToken = validateQrToken(req.params.qrToken);
     const pharmacy = await fetchPharmacyProfileByUserId(pharmacistUserId);
-    await verifyPrescriptionToken(qrToken);
-    const data = await fetchPrescriptionByQr(qrToken, String(pharmacy.id));
+    const verification = await verifyPrescriptionToken(qrToken);
+    const data = await fetchPrescriptionByQr(qrToken, String(pharmacy.id), verification.prescriptionId);
     await createAuditLog({
       ...getAuditRequestContext(req),
       actorUserId: pharmacistUserId,

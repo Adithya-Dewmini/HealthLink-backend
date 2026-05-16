@@ -405,7 +405,7 @@ const getGatewayOrderRecord = async (client: PoolClient, orderId: number) => {
       JOIN pharmacies p ON p.id = o.pharmacy_id
       WHERE o.id = $1
       LIMIT 1
-      FOR UPDATE
+      FOR UPDATE OF o
     `,
     [orderId]
   );

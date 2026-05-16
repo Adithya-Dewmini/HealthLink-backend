@@ -10,7 +10,25 @@ type HttpError = Error & { statusCode?: number };
 type Queryable = Pick<typeof pool, "query"> | PoolClient;
 type PrescriptionQrTokenPayload = {
   prescriptionId: string | number;
+  consultationId?: string | number | null;
   patientId?: number | null;
+  doctorId?: number | null;
+  medicalCenterId?: string | null;
+};
+type DecodedPrescriptionQrToken = {
+  prescriptionId?: number;
+  consultationId?: number | null;
+  patientId?: number | null;
+  doctorId?: number | null;
+  medicalCenterId?: string | null;
+  exp?: number;
+};
+type PrescriptionQrContext = {
+  prescriptionId: string | number;
+  consultationId?: string | number | null;
+  patientId?: number | null;
+  doctorId?: number | null;
+  medicalCenterId?: string | null;
 };
 
 const createStatusError = (message: string, statusCode: number) => {
@@ -23,11 +41,54 @@ export const createPrescriptionQrToken = (payload: PrescriptionQrTokenPayload) =
   jwt.sign(
     {
       prescriptionId: Number(payload.prescriptionId),
+      consultationId:
+        payload.consultationId === null || payload.consultationId === undefined
+          ? null
+          : Number(payload.consultationId),
       patientId: payload.patientId ?? null,
+      doctorId: payload.doctorId ?? null,
+      medicalCenterId: payload.medicalCenterId ?? null,
     },
     QR_SECRET,
     { expiresIn: PRESCRIPTION_QR_TOKEN_TTL }
   );
+
+const decodePrescriptionQrToken = (qrCode?: string | null) => {
+  if (!qrCode) return null;
+  return jwt.decode(qrCode) as DecodedPrescriptionQrToken | null;
+};
+
+const normalizeNullableNumber = (value: unknown) => {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const normalizeNullableString = (value: unknown) => {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text ? text : null;
+};
+
+const tokenMatchesPrescriptionContext = (
+  decoded: DecodedPrescriptionQrToken | null,
+  context: PrescriptionQrContext
+) => {
+  if (!decoded?.prescriptionId) {
+    return false;
+  }
+
+  return (
+    normalizeNullableNumber(decoded.prescriptionId) ===
+      normalizeNullableNumber(context.prescriptionId) &&
+    normalizeNullableNumber(decoded.consultationId) ===
+      normalizeNullableNumber(context.consultationId) &&
+    normalizeNullableNumber(decoded.patientId) === normalizeNullableNumber(context.patientId) &&
+    normalizeNullableNumber(decoded.doctorId) === normalizeNullableNumber(context.doctorId) &&
+    normalizeNullableString(decoded.medicalCenterId) ===
+      normalizeNullableString(context.medicalCenterId)
+  );
+};
 
 export const getPrescriptionQrMetadata = (qrCode?: string | null) => {
   if (!qrCode) {
@@ -70,7 +131,10 @@ export const ensurePrescriptionQrToken = async (
   client: Queryable,
   input: {
     prescriptionId: string | number;
+    consultationId?: string | number | null;
     patientId?: number | null;
+    doctorId?: number | null;
+    medicalCenterId?: string | null;
     qrCode?: string | null;
     isDispensed?: boolean;
   }
@@ -84,7 +148,10 @@ export const ensurePrescriptionQrToken = async (
   }
 
   const currentMeta = getPrescriptionQrMetadata(input.qrCode);
-  if (input.qrCode && currentMeta.isUsable) {
+  const decoded = decodePrescriptionQrToken(input.qrCode);
+  const hasExpectedContext = tokenMatchesPrescriptionContext(decoded, input);
+
+  if (input.qrCode && currentMeta.isUsable && hasExpectedContext) {
     return {
       qrToken: input.qrCode,
       refreshed: false,
@@ -94,7 +161,10 @@ export const ensurePrescriptionQrToken = async (
 
   const nextToken = createPrescriptionQrToken({
     prescriptionId: input.prescriptionId,
+    consultationId: input.consultationId ?? null,
     patientId: input.patientId ?? null,
+    doctorId: input.doctorId ?? null,
+    medicalCenterId: input.medicalCenterId ?? null,
   });
 
   await client.query(`UPDATE prescriptions SET qr_code = $1 WHERE id = $2`, [
@@ -127,17 +197,64 @@ const parseFrequency = (value: unknown) => {
 };
 
 export const verifyPrescriptionToken = async (token: string) => {
-  const decoded = jwt.verify(token, QR_SECRET) as { prescriptionId?: number };
+  const decoded = jwt.verify(token, QR_SECRET) as DecodedPrescriptionQrToken;
 
-  const result = await pool.query(`SELECT * FROM prescriptions WHERE id = $1`, [
-    decoded.prescriptionId,
-  ]);
+  const result = await pool.query<{
+    prescription_id: number;
+    consultation_id: number | null;
+    patient_id: number | null;
+    doctor_id: number | null;
+    medical_center_id: string | null;
+    qr_code: string | null;
+    dispensed_at: string | null;
+  }>(
+    `
+      SELECT
+        p.id AS prescription_id,
+        p.consultation_id,
+        c.patient_id,
+        c.doctor_id,
+        COALESCE(p.medical_center_id, c.medical_center_id) AS medical_center_id,
+        p.qr_code,
+        p.dispensed_at
+      FROM prescriptions p
+      LEFT JOIN consultations c
+        ON c.id = p.consultation_id
+      WHERE p.id = $1
+      LIMIT 1
+    `,
+    [decoded.prescriptionId]
+  );
 
   if (result.rows.length === 0) {
     throw createStatusError("Invalid prescription", 404);
   }
 
-  return { prescriptionId: decoded.prescriptionId };
+  const prescription = result.rows[0];
+  if (!prescription.qr_code || prescription.qr_code !== token) {
+    throw createStatusError("Prescription QR is no longer active", 401);
+  }
+
+  const matchesContext = tokenMatchesPrescriptionContext(decoded, {
+    prescriptionId: prescription.prescription_id,
+    consultationId: prescription.consultation_id,
+    patientId: prescription.patient_id,
+    doctorId: prescription.doctor_id,
+    medicalCenterId: prescription.medical_center_id,
+  });
+
+  if (!matchesContext) {
+    throw createStatusError("Prescription QR does not match the consultation", 401);
+  }
+
+  return {
+    prescriptionId: prescription.prescription_id,
+    consultationId: prescription.consultation_id,
+    patientId: prescription.patient_id,
+    doctorId: prescription.doctor_id,
+    medicalCenterId: prescription.medical_center_id,
+    dispensedAt: prescription.dispensed_at,
+  };
 };
 
 export const getPrescriptionDetails = async (prescriptionId: string, user?: { id?: number; role?: string }) => {
@@ -221,13 +338,20 @@ export const getPrescriptionDetails = async (prescriptionId: string, user?: { id
 
   const qrState = await ensurePrescriptionQrToken(pool, {
     prescriptionId: row.id,
+    consultationId: row.consultation_id ?? null,
     patientId: row.patient_id ?? null,
+    doctorId: row.doctor_id ?? null,
+    medicalCenterId: row.medical_center_id ?? null,
     qrCode: row.qr_code ?? null,
     isDispensed: Boolean(row.dispensed_at),
   });
 
   return {
     id: String(row.id),
+    consultationId: row.consultation_id ? String(row.consultation_id) : null,
+    patientId: row.patient_id ? String(row.patient_id) : null,
+    doctorId: row.doctor_id ? String(row.doctor_id) : null,
+    medicalCenterId: row.medical_center_id ? String(row.medical_center_id) : null,
     qrToken: qrState.qrToken,
     title:
       (typeof row.diagnosis === "string" && row.diagnosis.trim()) ||
@@ -237,6 +361,7 @@ export const getPrescriptionDetails = async (prescriptionId: string, user?: { id
     specialization: row.specialization ?? "General Physician",
     medicalCenterName: row.medical_center_name ?? null,
     prescribedAt: row.issued_at ?? row.consultation_created_at ?? row.created_at ?? null,
+    consultationCreatedAt: row.consultation_created_at ?? null,
     status: row.dispensed_at ? "COMPLETED" : "ACTIVE",
     qr: {
       status: qrState.qrStatus,

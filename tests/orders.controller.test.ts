@@ -105,6 +105,29 @@ describe("orders controller", () => {
     );
   });
 
+  it("returns a friendly stock message when checkout fails on inventory", async () => {
+    vi.mocked(checkoutCart).mockRejectedValue(
+      Object.assign(new Error('Insufficient stock for "Paracetamol"'), {
+        statusCode: 409,
+      })
+    );
+
+    const req = createMockRequest({
+      body: { fulfillment_type: "pickup" },
+      user: { id: 7, role: "patient" },
+    });
+    const res = createMockResponse();
+
+    await checkoutController(req as any, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        message: "Some medicines are no longer available.",
+      })
+    );
+  });
+
   it("writes an audit log when a pharmacist changes order status", async () => {
     vi.mocked(updatePharmacyOrderStatus).mockResolvedValue({
       message: "updated",

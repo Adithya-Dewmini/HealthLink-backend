@@ -20,7 +20,7 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
 export const verifyPrescription = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const result = await verifyPrescriptionToken(req.params.token);
-    return res.json({ valid: true, prescriptionId: result.prescriptionId });
+    return res.json({ valid: true, ...result });
   } catch (error) {
     const appError = error as HttpError;
     if (Number(appError?.statusCode) === 404) {

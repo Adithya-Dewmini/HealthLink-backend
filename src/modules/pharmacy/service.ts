@@ -564,7 +564,11 @@ export const fetchPharmacyProfileByUserId = async (userId: number) => {
   return pharmacy;
 };
 
-export const fetchPrescriptionByQr = async (qrToken: string, pharmacyId: string | null) => {
+export const fetchPrescriptionByQr = async (
+  qrToken: string,
+  pharmacyId: string | null,
+  prescriptionId?: string | number | null
+) => {
   const client = await pool.connect();
   try {
     await ensurePrescriptionItemDispenseColumns(client);
@@ -576,11 +580,16 @@ export const fetchPrescriptionByQr = async (qrToken: string, pharmacyId: string 
     `
       SELECT
         p.id AS prescription_id,
+        p.consultation_id,
         p.qr_code,
         p.is_seen,
         p.issued_at,
         p.dispensed_at,
         p.dispensed_by,
+        c.patient_id,
+        c.doctor_id,
+        COALESCE(p.medical_center_id, c.medical_center_id) AS medical_center_id,
+        mc.name AS medical_center_name,
         pu.name AS patient_name,
         du.name AS doctor_name,
         pi.id AS prescription_item_id,
@@ -599,14 +608,17 @@ export const fetchPrescriptionByQr = async (qrToken: string, pharmacyId: string 
         ON pu.id = c.patient_id
       LEFT JOIN users du
         ON du.id = c.doctor_id
+      LEFT JOIN medical_centers mc
+        ON mc.id = COALESCE(p.medical_center_id, c.medical_center_id)
       LEFT JOIN prescription_items pi
         ON pi.prescription_id = p.id
       LEFT JOIN medicines m
         ON LOWER(m.name) = LOWER(pi.medicine_name)
       WHERE p.qr_code = $1
+        AND ($2::int IS NULL OR p.id = $2::int)
       ORDER BY pi.id ASC
     `,
-    [qrToken]
+    [qrToken, prescriptionId ?? null]
   );
 
   if (!rowsQuery.rowCount) {
@@ -636,6 +648,11 @@ export const fetchPrescriptionByQr = async (qrToken: string, pharmacyId: string 
   return {
     prescription: {
       id: prescription.prescription_id,
+      consultationId: prescription.consultation_id ? String(prescription.consultation_id) : null,
+      patientId: prescription.patient_id ? String(prescription.patient_id) : null,
+      doctorId: prescription.doctor_id ? String(prescription.doctor_id) : null,
+      medicalCenterId: prescription.medical_center_id ? String(prescription.medical_center_id) : null,
+      medicalCenterName: prescription.medical_center_name ?? null,
       qrCode: prescription.qr_code,
       token: prescription.qr_code,
       isSeen: prescription.is_seen,
@@ -685,6 +702,11 @@ export const fetchPrescriptionById = async (prescriptionId: string, pharmacyId: 
     `
       SELECT
         p.id AS prescription_id,
+        p.consultation_id,
+        c.patient_id,
+        c.doctor_id,
+        COALESCE(p.medical_center_id, c.medical_center_id) AS medical_center_id,
+        mc.name AS medical_center_name,
         p.qr_code,
         p.status,
         p.is_seen,
@@ -697,6 +719,7 @@ export const fetchPrescriptionById = async (prescriptionId: string, pharmacyId: 
       LEFT JOIN consultations c ON c.id = p.consultation_id
       LEFT JOIN users patient_user ON patient_user.id = c.patient_id
       LEFT JOIN users doctor_user ON doctor_user.id = c.doctor_id
+      LEFT JOIN medical_centers mc ON mc.id = COALESCE(p.medical_center_id, c.medical_center_id)
       WHERE p.id = $1
       LIMIT 1
     `,
@@ -770,6 +793,11 @@ export const fetchPrescriptionById = async (prescriptionId: string, pharmacyId: 
   return {
     prescription: {
       id: normalizeDbId(prescription.prescription_id),
+      consultationId: prescription.consultation_id ? String(prescription.consultation_id) : null,
+      patientId: prescription.patient_id ? String(prescription.patient_id) : null,
+      doctorId: prescription.doctor_id ? String(prescription.doctor_id) : null,
+      medicalCenterId: prescription.medical_center_id ? String(prescription.medical_center_id) : null,
+      medicalCenterName: prescription.medical_center_name ?? null,
       qrCode: prescription.qr_code,
       status: prescription.status,
       isSeen: prescription.is_seen,
