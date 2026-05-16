@@ -3,13 +3,13 @@
   "version": "1.0.0",
   "description": "",
   "main": "dist/server.js",
-  "scripts": {
-    "build": "tsc",
-    "start": "npm run build && node dist/server.js",
-    "dev": "nodemon src/server.ts",
-    "seed:demo": "ts-node src/db/seeds/demoMarketplaceSeed.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
+ "scripts": {
+  "build": "tsc",
+  "start": "node dist/server.js",
+  "dev": "nodemon src/server.ts",
+  "seed:demo": "ts-node src/db/seeds/demoMarketplaceSeed.ts",
+  "test": "vitest run",
+  "test:watch": "vitest"
   },
   "keywords": [],
   "author": "",
