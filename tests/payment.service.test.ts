@@ -28,6 +28,7 @@ vi.mock("../src/config/env", () => ({
   },
 }));
 
+import { env } from "../src/config/env";
 import {
   createCheckoutSession,
   generatePayHereHash,
@@ -110,6 +111,13 @@ const orderRow = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  env.payHereMerchantId = "1211147";
+  env.payHereMerchantSecret = "sandbox-secret";
+  env.payHereBaseUrl = "https://sandbox.payhere.lk/pay/checkout";
+  env.payHereReturnUrl = "https://health-link-web.vercel.app/payment/return";
+  env.payHereCancelUrl = "https://health-link-web.vercel.app/payment/cancel";
+  env.payHereNotifyUrl = "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/notify";
+  env.paymentGatewayMode = "sandbox";
 });
 
 describe("payment service", () => {
@@ -217,6 +225,19 @@ describe("payment service", () => {
           String(sql).includes("FOR UPDATE OF o")
       )
     ).toBe(true);
+  });
+
+  it("rejects checkout when PayHere config contains placeholder or mismatched values", async () => {
+    env.payHereMerchantId = "your_sandbox_merchant_id";
+
+    const client = createMockClient(() => {
+      throw new Error("SQL should not run when gateway config is invalid");
+    });
+    connectMock.mockResolvedValue(client);
+
+    await expect(createCheckoutSession(88, 7)).rejects.toThrow(
+      "Payment gateway is not configured correctly."
+    );
   });
 
   it("marks a payment as paid and creates a single invoice for a valid notify callback", async () => {

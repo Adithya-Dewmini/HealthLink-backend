@@ -55,6 +55,29 @@ export type CheckoutSession = {
   fields: PayHereCheckoutFields;
 };
 
+export type HostedCheckoutDocument = {
+  html: string;
+  formFields: Pick<
+    PayHereCheckoutFields,
+    | "merchant_id"
+    | "return_url"
+    | "cancel_url"
+    | "notify_url"
+    | "order_id"
+    | "items"
+    | "currency"
+    | "amount"
+    | "first_name"
+    | "last_name"
+    | "email"
+    | "phone"
+    | "address"
+    | "city"
+    | "country"
+    | "hash"
+  >;
+};
+
 export type PayHereCheckoutFields = {
   merchant_id: string;
   return_url: string;
@@ -174,6 +197,23 @@ const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2))
 
 const formatGatewayAmount = (value: number) => normalizeMoney(value).toFixed(2);
 
+const PAYHERE_CHECKOUT_URLS = {
+  sandbox: "https://sandbox.payhere.lk/pay/checkout",
+  live: "https://www.payhere.lk/pay/checkout",
+} as const;
+
+const INVALID_GATEWAY_CONFIG_MESSAGE = "Payment gateway is not configured correctly.";
+
+const PAYHERE_PLACEHOLDER_VALUES = [
+  "your_sandbox_merchant_id",
+  "your_sandbox_merchant_secret",
+  "your-backend-name.onrender.com",
+  "your-backend-url.com",
+] as const;
+
+const PAYHERE_DEBUG_LOGS_ENABLED =
+  process.env.NODE_ENV !== "production" && process.env.NODE_ENV !== "test" && process.env.VITEST !== "true";
+
 const getHostedCheckoutBaseUrl = () => {
   if (env.payHereNotifyUrl) {
     try {
@@ -193,27 +233,171 @@ const escapeHtmlAttribute = (value: string) =>
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
-const getPaymentGatewayConfig = () => {
-  if (!env.payHereMerchantId || !env.payHereMerchantSecret) {
-    throw new HttpError(503, "Payment gateway is not configured");
-  }
-  const defaultCheckoutUrl =
-    env.paymentGatewayMode === "live"
-      ? "https://www.payhere.lk/pay/checkout"
-      : "https://sandbox.payhere.lk/pay/checkout";
+const isPlaceholderConfigValue = (value: string) =>
+  PAYHERE_PLACEHOLDER_VALUES.some((placeholder) => value.toLowerCase().includes(placeholder.toLowerCase()));
 
-  if (!env.payHereReturnUrl || !env.payHereCancelUrl || !env.payHereNotifyUrl) {
-    throw new HttpError(503, "Payment gateway URLs are not configured");
+const normalizeHttpsUrl = (value: string) => {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || isPlaceholderConfigValue(trimmed)) {
+    throw new HttpError(503, INVALID_GATEWAY_CONFIG_MESSAGE);
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new HttpError(503, INVALID_GATEWAY_CONFIG_MESSAGE);
+  }
+
+  if (parsed.protocol !== "https:") {
+    throw new HttpError(503, INVALID_GATEWAY_CONFIG_MESSAGE);
+  }
+
+  if (!parsed.hostname.trim()) {
+    throw new HttpError(503, INVALID_GATEWAY_CONFIG_MESSAGE);
+  }
+
+  return parsed.toString();
+};
+
+const logPayHereCheckoutPayload = (fields: PayHereCheckoutFields) => {
+  if (!PAYHERE_DEBUG_LOGS_ENABLED) {
+    return;
+  }
+
+  console.info("[payments] PayHere checkout payload", {
+    merchant_id: fields.merchant_id,
+    order_id: fields.order_id,
+    amount: fields.amount,
+    currency: fields.currency,
+    return_url: fields.return_url,
+    cancel_url: fields.cancel_url,
+    notify_url: fields.notify_url,
+    items: fields.items,
+    hashLength: fields.hash.length,
+  });
+};
+
+const validateHostedCheckoutFields = (
+  fields: PayHereCheckoutFields,
+  merchantSecret: string
+) => {
+  const processMerchantId = String(process.env.PAYHERE_MERCHANT_ID || "").trim();
+  const normalizedMerchantSecret = String(merchantSecret || "").trim();
+  const hash = String(fields.hash || "");
+  const issues: string[] = [];
+
+  if (!String(fields.merchant_id || "").trim()) {
+    issues.push("merchant_id is empty");
+  }
+  if (!processMerchantId || fields.merchant_id !== processMerchantId) {
+    issues.push("merchant_id does not match process.env.PAYHERE_MERCHANT_ID");
+  }
+  if (!normalizedMerchantSecret) {
+    issues.push("merchant secret is empty");
+  }
+  if (!/^\d+\.\d{2}$/.test(fields.amount)) {
+    issues.push("amount format is invalid");
+  }
+  if (fields.currency !== "LKR") {
+    issues.push("currency must be LKR");
+  }
+  if (!String(fields.return_url || "").includes("www.adithyadewmini.com")) {
+    issues.push("return_url must contain www.adithyadewmini.com");
+  }
+  if (!String(fields.cancel_url || "").includes("www.adithyadewmini.com")) {
+    issues.push("cancel_url must contain www.adithyadewmini.com");
+  }
+  if (!String(fields.notify_url || "").includes("healthlink-backend-5a75.onrender.com")) {
+    issues.push("notify_url must contain healthlink-backend-5a75.onrender.com");
+  }
+  if (isPlaceholderConfigValue(fields.return_url) || isPlaceholderConfigValue(fields.cancel_url) || isPlaceholderConfigValue(fields.notify_url)) {
+    issues.push("placeholder URL detected");
+  }
+  if (hash.length !== 32) {
+    issues.push("hash length must be 32");
   }
 
   return {
-    merchantId: env.payHereMerchantId,
-    merchantSecret: env.payHereMerchantSecret,
-    checkoutUrl: env.payHereBaseUrl || defaultCheckoutUrl,
-    returnUrl: env.payHereReturnUrl,
-    cancelUrl: env.payHereCancelUrl,
-    notifyUrl: env.payHereNotifyUrl,
-    mode: env.paymentGatewayMode === "live" ? ("live" as const) : ("sandbox" as const),
+    isValid: issues.length === 0,
+    issues,
+    merchantSecretLength: normalizedMerchantSecret.length,
+    hashLength: hash.length,
+  };
+};
+
+const logHostedCheckoutRenderPayload = (
+  fields: PayHereCheckoutFields,
+  merchantSecret: string
+) => {
+  const normalizedHash = String(fields.hash || "");
+  const normalizedMerchantSecret = String(merchantSecret || "").trim();
+
+  console.log({
+    source: "PAYHERE_HOSTED_FORM_DEBUG",
+    merchant_id: fields.merchant_id,
+    order_id: fields.order_id,
+    amount: fields.amount,
+    currency: fields.currency,
+    return_url: fields.return_url,
+    cancel_url: fields.cancel_url,
+    notify_url: fields.notify_url,
+    items: fields.items,
+    first_name: fields.first_name,
+    last_name: fields.last_name,
+    email: fields.email,
+    phone: fields.phone,
+    hashLength: normalizedHash.length,
+    hashStart: normalizedHash.slice(0, 4),
+    hashEnd: normalizedHash.slice(-4),
+    merchantSecretLength: normalizedMerchantSecret.length,
+  });
+};
+
+const buildHostedCheckoutValidationErrorHtml = (issues: string[]) => `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Payment configuration error</title>
+    <style>
+      body { font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+      .card { background:#ffffff; border:1px solid #dbe7f0; border-radius:20px; padding:32px; max-width:560px; box-shadow:0 30px 80px -50px rgba(15,23,42,.45); }
+      h1 { margin-top:0; }
+      ul { margin:16px 0 0; padding-left:20px; color:#475569; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Payment gateway is not configured correctly.</h1>
+      <p>HealthLink could not open PayHere because the hosted payment form failed validation.</p>
+      <ul>${issues.map((issue) => `<li>${escapeHtmlAttribute(issue)}</li>`).join("")}</ul>
+    </div>
+  </body>
+</html>`;
+
+const getPaymentGatewayConfig = () => {
+  const mode = env.paymentGatewayMode === "live" ? ("live" as const) : ("sandbox" as const);
+  const merchantId = String(env.payHereMerchantId || "").trim();
+  const merchantSecret = String(env.payHereMerchantSecret || "").trim();
+
+  if (!merchantId || !merchantSecret || isPlaceholderConfigValue(merchantId) || isPlaceholderConfigValue(merchantSecret)) {
+    throw new HttpError(503, INVALID_GATEWAY_CONFIG_MESSAGE);
+  }
+
+  const checkoutUrl = PAYHERE_CHECKOUT_URLS[mode];
+  if (env.payHereBaseUrl && String(env.payHereBaseUrl).trim() !== checkoutUrl) {
+    throw new HttpError(503, INVALID_GATEWAY_CONFIG_MESSAGE);
+  }
+
+  return {
+    merchantId,
+    merchantSecret,
+    checkoutUrl,
+    returnUrl: normalizeHttpsUrl(String(env.payHereReturnUrl || "")),
+    cancelUrl: normalizeHttpsUrl(String(env.payHereCancelUrl || "")),
+    notifyUrl: normalizeHttpsUrl(String(env.payHereNotifyUrl || "")),
+    mode,
   };
 };
 
@@ -277,10 +461,15 @@ export const generatePayHereHash = (
   currency: string,
   merchantSecret: string
 ) => {
-  const secretMd5 = crypto.createHash("md5").update(merchantSecret).digest("hex").toUpperCase();
+  const normalizedMerchantId = String(merchantId || "").trim();
+  const normalizedOrderId = String(orderId || "").trim();
+  const normalizedAmount = formatGatewayAmount(Number(amount));
+  const normalizedCurrency = String(currency || "LKR").trim().toUpperCase() || "LKR";
+  const normalizedMerchantSecret = String(merchantSecret || "").trim();
+  const secretMd5 = crypto.createHash("md5").update(normalizedMerchantSecret).digest("hex").toUpperCase();
   return crypto
     .createHash("md5")
-    .update(`${merchantId}${orderId}${formatGatewayAmount(Number(amount))}${currency}${secretMd5}`)
+    .update(`${normalizedMerchantId}${normalizedOrderId}${normalizedAmount}${normalizedCurrency}${secretMd5}`)
     .digest("hex")
     .toUpperCase();
 };
@@ -293,10 +482,16 @@ const buildPayHereMd5Sig = (
   statusCode: string,
   merchantSecret: string
 ) => {
-  const secretMd5 = crypto.createHash("md5").update(merchantSecret).digest("hex").toUpperCase();
+  const normalizedMerchantId = String(merchantId || "").trim();
+  const normalizedOrderId = String(orderId || "").trim();
+  const normalizedAmount = formatGatewayAmount(Number(amount));
+  const normalizedCurrency = String(currency || "LKR").trim().toUpperCase() || "LKR";
+  const normalizedStatusCode = String(statusCode || "").trim();
+  const normalizedMerchantSecret = String(merchantSecret || "").trim();
+  const secretMd5 = crypto.createHash("md5").update(normalizedMerchantSecret).digest("hex").toUpperCase();
   return crypto
     .createHash("md5")
-    .update(`${merchantId}${orderId}${amount}${currency}${statusCode}${secretMd5}`)
+    .update(`${normalizedMerchantId}${normalizedOrderId}${normalizedAmount}${normalizedCurrency}${normalizedStatusCode}${secretMd5}`)
     .digest("hex")
     .toUpperCase();
 };
@@ -362,7 +557,7 @@ const buildPayHereCheckoutFields = (
 ): PayHereCheckoutFields => {
   const { firstName, lastName } = splitPatientName(order.patient_name);
   const amount = formatGatewayAmount(payment.amount);
-  const currency = payment.currency || order.currency || "LKR";
+  const currency = "LKR";
   const hash = generatePayHereHash(
     gatewayConfig.merchantId,
     payment.gatewayOrderId,
@@ -711,6 +906,7 @@ export const createCheckoutSession = async (
       amount: normalizeMoney(order.total),
       currency: orderCurrency,
     });
+    logPayHereCheckoutPayload(fields);
     const hostedToken = buildHostedCheckoutToken(paymentId, orderId);
 
     return {
@@ -734,7 +930,7 @@ export const verifyPayHereNotification = (payload: Record<string, unknown>) => {
   const merchantId = String(payload.merchant_id ?? "");
   const orderId = String(payload.order_id ?? "");
   const amount = formatGatewayAmount(Number(payload.payhere_amount ?? 0));
-  const currency = String(payload.payhere_currency ?? "LKR");
+  const currency = String(payload.payhere_currency ?? "LKR").trim().toUpperCase() || "LKR";
   const statusCode = String(payload.status_code ?? "");
   const md5sig = String(payload.md5sig ?? "").toUpperCase();
 
@@ -1070,7 +1266,7 @@ export const getOrderInvoice = async (
 export const getHostedCheckoutHtml = async (
   paymentId: number,
   token: string
-) =>
+): Promise<HostedCheckoutDocument> =>
   withTransaction(async (client) => {
     const gatewayConfig = getPaymentGatewayConfig();
     const paymentResult = await client.query(
@@ -1099,15 +1295,62 @@ export const getHostedCheckoutHtml = async (
       amount: normalizeMoney(payment.amount),
       currency: payment.currency || order.currency || "LKR",
     });
+    const validation = validateHostedCheckoutFields(fields, gatewayConfig.merchantSecret);
+    if (!validation.isValid) {
+      return {
+        html: buildHostedCheckoutValidationErrorHtml(validation.issues),
+        formFields: {
+          merchant_id: fields.merchant_id,
+          return_url: fields.return_url,
+          cancel_url: fields.cancel_url,
+          notify_url: fields.notify_url,
+          order_id: fields.order_id,
+          items: fields.items,
+          currency: fields.currency,
+          amount: fields.amount,
+          first_name: fields.first_name,
+          last_name: fields.last_name,
+          email: fields.email,
+          phone: fields.phone,
+          address: fields.address,
+          city: fields.city,
+          country: fields.country,
+          hash: fields.hash,
+        },
+      };
+    }
 
-    const hiddenInputs = Object.entries(fields)
+    const orderedFieldNames: Array<keyof PayHereCheckoutFields> = [
+      "merchant_id",
+      "return_url",
+      "cancel_url",
+      "notify_url",
+      "order_id",
+      "items",
+      "currency",
+      "amount",
+      "first_name",
+      "last_name",
+      "email",
+      "phone",
+      "address",
+      "city",
+      "country",
+      "hash",
+      "custom_1",
+      "custom_2",
+    ];
+
+    const hiddenInputs = orderedFieldNames
       .map(
-        ([key, value]) =>
-          `<input type="hidden" name="${escapeHtmlAttribute(key)}" value="${escapeHtmlAttribute(String(value))}" />`
+        (key) =>
+          `<input type="hidden" name="${escapeHtmlAttribute(String(key))}" value="${escapeHtmlAttribute(
+            String(fields[key] ?? "")
+          )}" />`
       )
       .join("\n");
 
-    return `<!doctype html>
+    const html = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -1166,4 +1409,26 @@ export const getHostedCheckoutHtml = async (
     </script>
   </body>
 </html>`;
+
+    return {
+      html,
+      formFields: {
+        merchant_id: fields.merchant_id,
+        return_url: fields.return_url,
+        cancel_url: fields.cancel_url,
+        notify_url: fields.notify_url,
+        order_id: fields.order_id,
+        items: fields.items,
+        currency: fields.currency,
+        amount: fields.amount,
+        first_name: fields.first_name,
+        last_name: fields.last_name,
+        email: fields.email,
+        phone: fields.phone,
+        address: fields.address,
+        city: fields.city,
+        country: fields.country,
+        hash: fields.hash,
+      },
+    };
   });

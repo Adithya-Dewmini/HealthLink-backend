@@ -23,10 +23,12 @@ vi.mock("../src/services/notification.service", () => ({
 
 import {
   createPharmacyOrderCheckoutController,
+  getPayHereHostedCheckoutController,
   payHereNotifyController,
 } from "../src/controllers/payment.controller";
 import {
   createCheckoutSession,
+  getHostedCheckoutHtml,
   getPaymentStatus,
   updatePaymentFromGatewayNotification,
 } from "../src/services/payment.service";
@@ -99,6 +101,95 @@ describe("payment controller", () => {
         message: "Unable to complete checkout. Please try again.",
       })
     );
+  });
+
+  it("returns the configured gateway error message when PayHere config is invalid", async () => {
+    vi.mocked(createCheckoutSession).mockRejectedValue(
+      Object.assign(new Error("Payment gateway is not configured correctly."), { statusCode: 503 })
+    );
+
+    const req = createMockRequest({
+      params: { orderId: "88" },
+      user: { id: 7, role: "patient" },
+    });
+    const res = createMockResponse();
+
+    await createPharmacyOrderCheckoutController(req as any, res);
+
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        message: "Payment gateway is not configured correctly.",
+      })
+    );
+  });
+
+  it("logs PayHere hosted form fields before sending hosted checkout html", async () => {
+    vi.mocked(getHostedCheckoutHtml).mockResolvedValue({
+      html: "<html><body>PayHere</body></html>",
+      formFields: {
+        merchant_id: "1235775",
+        return_url: "https://www.adithyadewmini.com/payment/return",
+        cancel_url: "https://www.adithyadewmini.com/payment/cancel",
+        notify_url: "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/notify",
+        order_id: "HLPAY-21-123",
+        items: "HealthLink Pharmacy order #21",
+        currency: "LKR",
+        amount: "150.00",
+        first_name: "Test",
+        last_name: "Patient",
+        email: "patient@example.com",
+        phone: "0771234567",
+        address: "21 Main Street",
+        city: "Colombo",
+        country: "Sri Lanka",
+        hash: "ABCD1234EFGH5678IJKL9012MNOP3456",
+      },
+    } as any);
+
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const req = createMockRequest({
+      params: { paymentId: "8" },
+      query: { token: "signed-token" },
+    });
+    const res = createMockResponse();
+
+    await getPayHereHostedCheckoutController(req as any, res);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "PAYHERE_HOSTED_FORM_DEBUG",
+        merchant_id: "1235775",
+        order_id: "HLPAY-21-123",
+        amount: "150.00",
+        currency: "LKR",
+        fieldNames: [
+          "merchant_id",
+          "return_url",
+          "cancel_url",
+          "notify_url",
+          "order_id",
+          "items",
+          "currency",
+          "amount",
+          "first_name",
+          "last_name",
+          "email",
+          "phone",
+          "address",
+          "city",
+          "country",
+          "hash",
+        ],
+        hashLength: 32,
+        hashStart: "ABCD",
+        hashEnd: "3456",
+      })
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.body).toBe("<html><body>PayHere</body></html>");
+
+    consoleSpy.mockRestore();
   });
 
   it("processes a successful PayHere notification and emits realtime updates", async () => {

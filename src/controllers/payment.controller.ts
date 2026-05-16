@@ -69,8 +69,12 @@ const mapCheckoutSessionErrorForClient = (error: unknown) => {
     return error;
   }
 
-  if (statusCode === 503 || message.includes("payment gateway is not configured")) {
-    return new HttpError(503, "Payment gateway is not configured");
+  if (
+    statusCode === 503 ||
+    message.includes("payment gateway is not configured") ||
+    message.includes("payment gateway is not configured correctly")
+  ) {
+    return new HttpError(503, "Payment gateway is not configured correctly.");
   }
 
   return new HttpError(500, "Unable to complete checkout. Please try again.");
@@ -222,14 +226,38 @@ export const getPayHereHostedCheckoutController = async (req: Request, res: Resp
       throw error;
     }
 
-    const html = await getHostedCheckoutHtml(paymentId, token);
+    const hostedCheckout = await getHostedCheckoutHtml(paymentId, token);
+    const formFields = hostedCheckout.formFields;
+    console.log({
+      source: "PAYHERE_HOSTED_FORM_DEBUG",
+      merchant_id: formFields.merchant_id,
+      order_id: formFields.order_id,
+      amount: formFields.amount,
+      currency: formFields.currency,
+      return_url: formFields.return_url,
+      cancel_url: formFields.cancel_url,
+      notify_url: formFields.notify_url,
+      items: formFields.items,
+      first_name: formFields.first_name,
+      last_name: formFields.last_name,
+      email: formFields.email,
+      phone: formFields.phone,
+      address: formFields.address,
+      city: formFields.city,
+      country: formFields.country,
+      fieldNames: Object.keys(formFields),
+      hashLength: formFields.hash ? formFields.hash.length : 0,
+      hashStart: formFields.hash ? formFields.hash.slice(0, 4) : null,
+      hashEnd: formFields.hash ? formFields.hash.slice(-4) : null,
+      merchantSecretLength: process.env.PAYHERE_MERCHANT_SECRET ? process.env.PAYHERE_MERCHANT_SECRET.trim().length : 0,
+    });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.setHeader(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self' https://sandbox.payhere.lk https://www.payhere.lk; base-uri 'self'; frame-ancestors 'none'"
     );
-    return res.status(200).send(html);
+    return res.status(200).send(hostedCheckout.html);
   } catch (error) {
     return handleError(res, error, "Failed to load hosted payment checkout");
   }
