@@ -55,7 +55,7 @@ describe("payment controller", () => {
       hostedToken: "abc",
       fields: {
         merchant_id: "123",
-        order_id: "HLPAY-88-123",
+        order_id: "88",
         amount: "2500.00",
         currency: "LKR",
       },
@@ -132,7 +132,7 @@ describe("payment controller", () => {
         return_url: "https://www.adithyadewmini.com/payment/return",
         cancel_url: "https://www.adithyadewmini.com/payment/cancel",
         notify_url: "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/notify",
-        order_id: "HLPAY-21-123",
+        order_id: "21",
         items: "HealthLink Pharmacy order #21",
         currency: "LKR",
         amount: "150.00",
@@ -160,7 +160,7 @@ describe("payment controller", () => {
       expect.objectContaining({
         source: "PAYHERE_HOSTED_FORM_DEBUG",
         merchant_id: "1235775",
-        order_id: "HLPAY-21-123",
+        order_id: "21",
         amount: "150.00",
         currency: "LKR",
         fieldNames: [
@@ -262,7 +262,7 @@ describe("payment controller", () => {
         id: 501,
         gateway: "payhere",
         gatewayPaymentId: "PH-12345",
-        gatewayOrderId: "HLPAY-88-123",
+        gatewayOrderId: "88",
         amount: 2500,
         currency: "LKR",
         status: "paid",
@@ -292,7 +292,7 @@ describe("payment controller", () => {
     const req = createMockRequest({
       body: {
         merchant_id: "123",
-        order_id: "HLPAY-88-123",
+        order_id: "88",
         status_code: "2",
       },
     });

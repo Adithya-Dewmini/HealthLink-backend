@@ -850,10 +850,9 @@ export const createCheckoutSession = async (
     }
 
     let paymentId = activePendingPayment ? Number(activePendingPayment.id) : 0;
-    let gatewayOrderId = activePendingPayment ? String(activePendingPayment.gateway_order_id) : "";
+    const gatewayOrderId = String(orderId);
 
-    if (!paymentId || !gatewayOrderId) {
-      gatewayOrderId = `HLPAY-${orderId}-${Date.now()}`;
+    if (!paymentId) {
       const paymentResult = await client.query(
         `
           INSERT INTO payments (
@@ -882,12 +881,13 @@ export const createCheckoutSession = async (
       await client.query(
         `
           UPDATE payments
-          SET amount = $2,
-              currency = $3,
+          SET gateway_order_id = $2,
+              amount = $3,
+              currency = $4,
               updated_at = NOW()
           WHERE id = $1
         `,
-        [paymentId, normalizeMoney(order.total), orderCurrency]
+        [paymentId, gatewayOrderId, normalizeMoney(order.total), orderCurrency]
       );
     }
 

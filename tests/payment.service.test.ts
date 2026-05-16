@@ -140,7 +140,7 @@ describe("payment service", () => {
           rows: [
             {
               id: 501,
-              gateway_order_id: "HLPAY-88-1715820000000",
+              gateway_order_id: "88",
               amount: 2500,
               currency: "LKR",
             },
@@ -148,7 +148,7 @@ describe("payment service", () => {
         };
       }
 
-      if (sql.startsWith("UPDATE payments SET amount = $2")) {
+      if (sql.startsWith("UPDATE payments SET gateway_order_id = $2")) {
         return { rows: [] };
       }
 
@@ -172,7 +172,7 @@ describe("payment service", () => {
     expect(session.fields.hash).toBe(
       generatePayHereHash(
         "1211147",
-        "HLPAY-88-1715820000000",
+        "88",
         "2500.00",
         "LKR",
         "sandbox-secret"
@@ -294,7 +294,7 @@ describe("payment service", () => {
             {
               id: 501,
               gateway: "payhere",
-              gateway_order_id: "HLPAY-88-1715820000000",
+              gateway_order_id: "88",
               gateway_payment_id: "PH-12345",
               amount: 2500,
               currency: "LKR",
@@ -345,14 +345,14 @@ describe("payment service", () => {
 
     const payload = {
       merchant_id: "1211147",
-      order_id: "HLPAY-88-1715820000000",
+      order_id: "88",
       payment_id: "PH-12345",
       payhere_amount: "2500.00",
       payhere_currency: "LKR",
       status_code: "2",
       md5sig: buildNotifyMd5Sig({
         merchantId: "1211147",
-        orderId: "HLPAY-88-1715820000000",
+        orderId: "88",
         amount: "2500.00",
         currency: "LKR",
         statusCode: "2",
@@ -389,7 +389,7 @@ describe("payment service", () => {
 
     const result = await updatePaymentFromGatewayNotification({
       merchant_id: "1211147",
-      order_id: "HLPAY-88-1715820000000",
+      order_id: "88",
       payhere_amount: "2500.00",
       payhere_currency: "LKR",
       status_code: "2",
@@ -432,13 +432,13 @@ describe("payment service", () => {
 
     const result = await updatePaymentFromGatewayNotification({
       merchant_id: "1211147",
-      order_id: "HLPAY-88-1715820000000",
+      order_id: "88",
       payhere_amount: "2500.00",
       payhere_currency: "LKR",
       status_code: "2",
       md5sig: buildNotifyMd5Sig({
         merchantId: "1211147",
-        orderId: "HLPAY-88-1715820000000",
+        orderId: "88",
         amount: "2500.00",
         currency: "LKR",
         statusCode: "2",
@@ -510,13 +510,13 @@ describe("payment service", () => {
 
     const result = await updatePaymentFromGatewayNotification({
       merchant_id: "1211147",
-      order_id: "HLPAY-88-1715820000000",
+      order_id: "88",
       payhere_amount: "2500.00",
       payhere_currency: "LKR",
       status_code: "2",
       md5sig: buildNotifyMd5Sig({
         merchantId: "1211147",
-        orderId: "HLPAY-88-1715820000000",
+        orderId: "88",
         amount: "2500.00",
         currency: "LKR",
         statusCode: "2",
@@ -578,13 +578,13 @@ describe("payment service", () => {
 
     const result = await updatePaymentFromGatewayNotification({
       merchant_id: "1211147",
-      order_id: "HLPAY-88-1715820000000",
+      order_id: "88",
       payhere_amount: "2500.00",
       payhere_currency: "LKR",
       status_code: "-1",
       md5sig: buildNotifyMd5Sig({
         merchantId: "1211147",
-        orderId: "HLPAY-88-1715820000000",
+        orderId: "88",
         amount: "2500.00",
         currency: "LKR",
         statusCode: "-1",
