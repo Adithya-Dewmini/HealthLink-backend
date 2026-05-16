@@ -1,5 +1,8 @@
 import pool from "../config/db";
 import { columnExists } from "./admin.schema.service";
+import { env } from "../config/env";
+import { createAuditLogWithClient } from "./audit.service";
+import { generateToken, hashToken, sha256 } from "../utils/security";
 
 type ListAdminUsersOptions = {
   role?: string;
@@ -9,6 +12,12 @@ type ListAdminUsersOptions = {
   search?: string;
   page?: number;
   pageSize?: number;
+};
+
+type CreateAdminUserInput = {
+  name: unknown;
+  email: unknown;
+  actorUserId: number;
 };
 
 type AdminUserRow = {
@@ -27,6 +36,53 @@ type AdminUserRow = {
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
+
+const normalizeEmail = (value: unknown) => String(value || "").trim().toLowerCase();
+const normalizeName = (value: unknown) => String(value || "").trim();
+const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const createStatusError = (message: string, statusCode: number) => {
+  const error = new Error(message) as Error & { statusCode?: number };
+  error.statusCode = statusCode;
+  return error;
+};
+
+const getAdminSetupBaseUrl = () => {
+  const baseUrl =
+    env.appWebUrl?.trim() ||
+    env.publicAppUrl?.trim() ||
+    env.receptionistSetupUrl?.trim() ||
+    null;
+
+  return baseUrl ? baseUrl.replace(/\/$/, "") : null;
+};
+
+const buildAdminSetupLink = (token: string) => {
+  const baseUrl = getAdminSetupBaseUrl();
+  const scheme = String(env.mobileAppScheme || "healthlink").trim();
+  return baseUrl
+    ? `${baseUrl}/setup-password?token=${encodeURIComponent(token)}`
+    : `${scheme}://set-password?token=${encodeURIComponent(token)}`;
+};
+
+const createPasswordSetupToken = async (userId: number) => {
+  const rawToken = generateToken();
+  const lookupHash = sha256(rawToken);
+  const hashedToken = await hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+  await pool.query(
+    `
+      INSERT INTO password_setup_tokens (user_id, token, token_lookup_hash, expires_at, is_used)
+      VALUES ($1, $2, $3, $4, FALSE)
+    `,
+    [userId, hashedToken, lookupHash, expiresAt]
+  );
+
+  return {
+    rawToken,
+    expiresAt: expiresAt.toISOString(),
+  };
+};
 
 const normalizePositiveInteger = (value: number | undefined, fallback: number, max?: number) => {
   if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
@@ -196,4 +252,95 @@ export const listAdminUsers = async (options: ListAdminUsersOptions = {}) => {
       totalPages,
     },
   };
+};
+
+export const createAdminUser = async (input: CreateAdminUserInput) => {
+  const name = normalizeName(input.name);
+  const email = normalizeEmail(input.email);
+
+  if (!name || !email) {
+    throw createStatusError("Name and email are required", 400);
+  }
+
+  if (!validateEmail(email)) {
+    throw createStatusError("A valid email is required", 400);
+  }
+
+  const hasUserIsActive = await columnExists("users", "is_active");
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const existingUser = await client.query<{ id: number }>(
+      `SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1`,
+      [email]
+    );
+
+    if (existingUser.rows.length > 0) {
+      throw createStatusError("User already exists with this email", 409);
+    }
+
+    const userInsertSql = hasUserIsActive
+      ? `
+          INSERT INTO users (name, email, password, password_hash, is_password_set, role, is_active)
+          VALUES ($1, $2, NULL, NULL, FALSE, 'admin', TRUE)
+          RETURNING id, name, email, role, is_active
+        `
+      : `
+          INSERT INTO users (name, email, password, password_hash, is_password_set, role)
+          VALUES ($1, $2, NULL, NULL, FALSE, 'admin')
+          RETURNING id, name, email, role, TRUE AS is_active
+        `;
+
+    const userResult = await client.query<{
+      id: number;
+      name: string;
+      email: string;
+      role: "admin";
+      is_active: boolean;
+    }>(userInsertSql, [name, email]);
+
+    const createdUser = userResult.rows[0];
+    const rawToken = generateToken();
+    const lookupHash = sha256(rawToken);
+    const hashedToken = await hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await client.query(
+      `
+        INSERT INTO password_setup_tokens (user_id, token, token_lookup_hash, expires_at, is_used)
+        VALUES ($1, $2, $3, $4, FALSE)
+      `,
+      [createdUser.id, hashedToken, lookupHash, expiresAt]
+    );
+
+    await createAuditLogWithClient(client, {
+      userId: input.actorUserId,
+      action: "admin_user_created",
+      entityType: "user",
+      entityId: String(createdUser.id),
+      metadata: {
+        created_role: "admin",
+        created_email: createdUser.email,
+      },
+    });
+
+    await client.query("COMMIT");
+
+    return {
+      id: String(createdUser.id),
+      name: createdUser.name,
+      email: createdUser.email,
+      role: createdUser.role,
+      is_active: Boolean(createdUser.is_active),
+      setup_link: buildAdminSetupLink(rawToken),
+      setup_token_expires_at: expiresAt.toISOString(),
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 };

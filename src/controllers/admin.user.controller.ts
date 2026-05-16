@@ -1,6 +1,6 @@
 import type { Response } from "express";
 import type { AuthenticatedRequest } from "../types/auth";
-import { listAdminUsers } from "../services/admin-user.service";
+import { createAdminUser, listAdminUsers } from "../services/admin-user.service";
 
 type HttpError = Error & { statusCode?: number; code?: string };
 
@@ -51,5 +51,25 @@ export const listAdminUsersController = async (req: AuthenticatedRequest, res: R
   } catch (error) {
     logAdminEndpointError("users", error);
     return handleControllerError(res, error, "Failed to load admin users");
+  }
+};
+
+export const createAdminUserController = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const actorUserId = Number(req.user?.id);
+    if (!Number.isFinite(actorUserId) || actorUserId <= 0) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const data = await createAdminUser({
+      name: req.body?.name,
+      email: req.body?.email,
+      actorUserId,
+    });
+
+    return res.status(201).json(data);
+  } catch (error) {
+    logAdminEndpointError("users:create-admin", error);
+    return handleControllerError(res, error, "Failed to create admin account");
   }
 };
