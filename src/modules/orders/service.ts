@@ -19,6 +19,38 @@ import type {
 } from "./types";
 
 type DbRecord = Record<string, any>;
+type CheckoutProductRow = {
+  marketplace_product_id: number | string;
+  pharmacy_id: number | string;
+  inventory_item_id: number | string;
+  name: string;
+  price: number | string | null;
+  discount_price: number | string | null;
+  requires_prescription: boolean;
+  is_active: boolean;
+  verification_status: string;
+  pharmacy_status: string;
+  stock_quantity: number | string | null;
+  reserved_quantity: number | string | null;
+  available_stock: number | string | null;
+};
+type OrderMutationItemRow = {
+  id: number | string;
+  inventory_item_id: number | string;
+  quantity: number | string | null;
+};
+type LockedOrderItemRow = {
+  id: number | string;
+  inventory_item_id: number | string;
+  requested_quantity: number | string | null;
+  approved_quantity: number | string | null;
+  quantity: number | string | null;
+  unit_price: number | string | null;
+};
+type InventoryAvailabilityRow = {
+  stock_quantity: number | string | null;
+  reserved_quantity: number | string | null;
+};
 
 const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2));
 
@@ -146,7 +178,7 @@ const normalizeOrderItem = (row: DbRecord): OrderItemSummary => ({
 });
 
 const loadOrderItems = async (client: PoolClient, orderId: number) => {
-  const result = await client.query(
+  const result = await client.query<CheckoutProductRow>(
     `
       SELECT
         oi.id AS order_item_id,
@@ -432,7 +464,9 @@ const loadCheckoutProducts = async (
     [pharmacyId, marketplaceProductIds]
   );
 
-  return new Map(result.rows.map((row) => [Number(row.marketplace_product_id), row]));
+  return new Map<number, CheckoutProductRow>(
+    result.rows.map((row) => [Number(row.marketplace_product_id), row])
+  );
 };
 
 const assertCheckoutProduct = (product: DbRecord | undefined, quantity: number) => {
@@ -528,7 +562,7 @@ const applyInventoryFinalization = async (
 };
 
 const getOrderItemsForMutation = async (client: PoolClient, orderId: number) => {
-  const result = await client.query(
+  const result = await client.query<OrderMutationItemRow>(
     `
       SELECT id, inventory_item_id, COALESCE(approved_quantity, quantity, 0) AS quantity
       FROM order_items
@@ -976,7 +1010,7 @@ export const reviewPharmacyOrder = async (pharmacyUserId: number, input: ReviewO
       throw new HttpError(500, "Inventory reservation column is not available");
     }
 
-    const lockedItems = await client.query(
+    const lockedItems = await client.query<LockedOrderItemRow>(
       `
         SELECT id, inventory_item_id, requested_quantity, approved_quantity, quantity, unit_price
         FROM order_items
@@ -985,7 +1019,9 @@ export const reviewPharmacyOrder = async (pharmacyUserId: number, input: ReviewO
       `,
       [input.id]
     );
-    const itemMap = new Map(lockedItems.rows.map((item) => [Number(item.id), item]));
+    const itemMap = new Map<number, LockedOrderItemRow>(
+      lockedItems.rows.map((item) => [Number(item.id), item])
+    );
 
     let availableCount = 0;
     let partialCount = 0;
@@ -1021,7 +1057,7 @@ export const reviewPharmacyOrder = async (pharmacyUserId: number, input: ReviewO
       }
 
       if (nextApprovedQuantity > 0) {
-        const inventoryRow = await client.query(
+        const inventoryRow = await client.query<InventoryAvailabilityRow>(
           `
             SELECT
               ${quoteIdent(inventory.stockCol)} AS stock_quantity,

@@ -11,6 +11,33 @@ import type {
 } from "./types";
 
 type DbRecord = Record<string, any>;
+type InventoryBackedMedicineRow = {
+  inventory_item_id: number | string;
+  name: string;
+  generic_name: string | null;
+  description: string | null;
+  image_url: string | null;
+  category_name: string | null;
+  brand_name: string | null;
+  stock_quantity: number | string | null;
+};
+type StoreProductRow = {
+  id: number | string;
+  pharmacy_id: number | string;
+  inventory_item_id: number | string;
+  name: string;
+  generic_name: string | null;
+  brand: string | null;
+  description: string | null;
+  category: string | null;
+  price: number | string | null;
+  discount_price: number | string | null;
+  image_url: string | null;
+  requires_prescription: boolean;
+  is_featured: boolean;
+  is_active: boolean;
+  stock_quantity: number | string | null;
+};
 type MarketplaceSearchInput =
   | string
   | {
@@ -106,7 +133,7 @@ const getInventoryBackedMedicine = async (
   inventoryItemId: number
 ) => {
   const inventory = await getInventorySchema(client);
-  const result = await client.query(
+  const result = await client.query<InventoryBackedMedicineRow>(
     `
       SELECT
         m.id AS inventory_item_id,
@@ -226,7 +253,7 @@ const getStoreProducts = async (
     `);
   }
 
-  const result = await client.query(
+  const result = await client.query<StoreProductRow>(
     `
       SELECT
         mp.id,
@@ -271,8 +298,8 @@ export const getMarketplaceStoreByPharmacyId = async (
 
     const products = await getStoreProducts(client, pharmacyId);
     const featuredProducts = products.filter((product) => product.isFeatured);
-    const categories = Array.from(
-      new Set(
+    const categories: string[] = Array.from(
+      new Set<string>(
         products
           .map((product) => product.category?.trim())
           .filter((value): value is string => Boolean(value))
@@ -310,8 +337,8 @@ export const searchMarketplaceProducts = async (input: MarketplaceSearchInput) =
             terms: input.terms,
           };
 
-    const searchTerms = Array.from(
-      new Set(
+    const searchTerms: string[] = Array.from(
+      new Set<string>(
         [
           rawInput.search,
           rawInput.query,
@@ -319,7 +346,7 @@ export const searchMarketplaceProducts = async (input: MarketplaceSearchInput) =
           ...(Array.isArray(rawInput.terms) ? rawInput.terms : []),
         ]
           .map(normalizeSearchTerm)
-          .filter((term) => term.length > 0)
+          .filter((term): term is string => term.length > 0)
       )
     );
 
