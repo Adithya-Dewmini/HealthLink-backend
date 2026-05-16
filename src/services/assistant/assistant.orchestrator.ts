@@ -4,9 +4,10 @@ import {
   classifyMedicalRisk,
   detectEmergency,
   normalizeMessage,
+  sanitizeAIHealthReply,
   sanitizeMedicalReply,
 } from "./assistant.guardrails";
-import { parseMessageWithAI } from "./assistant.aiClient";
+import { generateSmartAssistantReply } from "./assistant.aiClient";
 import {
   detectIntent,
   extractDatePreference,
@@ -16,6 +17,7 @@ import {
 } from "./assistant.intent";
 import { clearConversationState, getConversationState, updateConversationState } from "./assistant.memory";
 import { classifyMedicineSafety } from "./assistant.medicineSafety";
+import { getHealthLinkKnowledgeContext } from "./assistant.knowledge";
 import {
   extractDosageForm,
   extractMedicineName,
@@ -40,6 +42,7 @@ import {
 } from "./assistant.tools";
 import type {
   AssistantAction,
+  AIChatResult,
   AssistantExtractedEntities,
   AssistantRequestContext,
   AssistantResponse,
@@ -121,12 +124,12 @@ const buildSmallTalkResponse = (conversationId: string): AssistantResponse => ({
 const buildUnknownResponse = (conversationId: string): AssistantResponse => ({
   conversationId,
   reply:
-    "I can help with doctor booking, queue status, prescriptions, pharmacy items, order help, medical records, and simple health questions.",
+    "I’m not fully sure what you need. You can ask me to book a doctor, search pharmacy items, explain a prescription, check your queue, track medicine orders, or answer a simple health question.",
   intent: "UNKNOWN",
   riskLevel: "NONE",
   extracted: {},
   actions: [],
-  suggestions: ["Book a doctor", "Search pharmacy", "Show my prescriptions"],
+  suggestions: ["Book a doctor", "Search pharmacy", "Show my prescriptions", "Ask a health question"],
 });
 
 const buildPharmacySearchAction = (extracted: AssistantExtractedEntities): AssistantAction => ({
@@ -152,6 +155,206 @@ const buildMedicineDoctorAction = (specialty?: string): AssistantAction => ({
     specialty: specialty || "General Physician",
   },
 });
+
+const buildOpenPrescriptionsAction = (): AssistantAction => ({
+  type: "OPEN_PRESCRIPTIONS",
+  label: "Open Prescriptions",
+});
+
+const buildOpenMedicalRecordsAction = (): AssistantAction => ({
+  type: "OPEN_MEDICAL_RECORDS",
+  label: "Open Medical Records",
+});
+
+const buildOpenOrderStatusAction = (): AssistantAction => ({
+  type: "OPEN_ORDER_STATUS",
+  label: "Open Orders",
+});
+
+const AI_SAFE_ACTION_TYPES = new Set<AssistantAction["type"]>([
+  "OPEN_DOCTOR_SEARCH",
+  "OPEN_PRESCRIPTIONS",
+  "OPEN_PHARMACY_SEARCH",
+  "OPEN_QUEUE",
+  "OPEN_MEDICAL_RECORDS",
+  "OPEN_ORDER_STATUS",
+  "OPEN_CART",
+  "OPEN_APPOINTMENTS",
+  "OPEN_PRESCRIPTION_ORDER",
+  "ASK_FOLLOW_UP",
+  "CLEAR_CONTEXT",
+]);
+
+const dedupeActions = (actions: AssistantAction[]) => {
+  const seen = new Set<string>();
+  return actions.filter((action) => {
+    const key = `${action.type}:${JSON.stringify(action.payload ?? {})}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+};
+
+const normalizeAiSuggestedActions = (actions: AssistantAction[] | undefined) =>
+  dedupeActions((actions ?? []).filter((action) => AI_SAFE_ACTION_TYPES.has(action.type)));
+
+const isExplanationStyleQuery = (normalized: string) =>
+  /^(what is|what are|what does|how do i|how do|can i|should i|which doctor|what should i do|do i need)\b/.test(
+    normalized
+  ) ||
+  normalized.includes("used for") ||
+  normalized.includes("low stock");
+
+const buildConversationSummary = (state: ConversationState) =>
+  [
+    state.lastIntent ? `Last intent: ${state.lastIntent}` : null,
+    state.pendingBooking?.specialty ? `Booking specialty: ${state.pendingBooking.specialty}` : null,
+    state.pendingBooking?.preferredDate ? `Preferred date: ${state.pendingBooking.preferredDate}` : null,
+    state.pendingBooking?.preferredTime ? `Preferred time: ${state.pendingBooking.preferredTime}` : null,
+    state.extracted?.medicineName ? `Medicine: ${state.extracted.medicineName}` : null,
+    state.extracted?.symptoms?.length ? `Symptoms: ${state.extracted.symptoms.join(", ")}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+const formatTitleCase = (value?: string) =>
+  String(value || "")
+    .trim()
+    .replace(/\b\w/g, (part) => part.toUpperCase());
+
+const buildHeuristicSmartReply = (params: {
+  normalized: string;
+  intent: AssistantResponse["intent"];
+  extracted: AssistantExtractedEntities;
+  medicineSafety: ReturnType<typeof classifyMedicineSafety>;
+}): AIChatResult | null => {
+  const { normalized, intent, extracted, medicineSafety } = params;
+  const medicineName = formatTitleCase(extracted.medicineName);
+  const specialty = extracted.specialty || "General Physician";
+
+  if (normalized.includes("low stock")) {
+    return {
+      reply:
+        "Low stock means the pharmacy has only a small quantity left for that item. Availability can change quickly, so open pharmacy search to check current stock before ordering.",
+      intent: "APP_HELP",
+      riskLevel: "NONE",
+      suggestedActions: [buildPharmacySearchAction(extracted)],
+    };
+  }
+
+  if (normalized.includes("qr prescription") || normalized.includes("use qr prescription")) {
+    return {
+      reply:
+        "Open Prescriptions, choose your active QR prescription, then send it to a pharmacy for fulfilment. I can open your prescriptions now.",
+      intent: "PRESCRIPTION_FULFILLMENT",
+      riskLevel: "NONE",
+      suggestedActions: [
+        buildOpenPrescriptionsAction(),
+        { type: "OPEN_PRESCRIPTION_ORDER", label: "Start Prescription Order" },
+      ],
+    };
+  }
+
+  if ((normalized.startsWith("what is") || normalized.includes("used for")) && extracted.medicineName) {
+    const lowerMedicine = extracted.medicineName.toLowerCase();
+    const reply =
+      lowerMedicine.includes("paracetamol") ||
+      lowerMedicine.includes("panadol") ||
+      lowerMedicine.includes("acetaminophen")
+        ? "Paracetamol is a common over-the-counter medicine used for pain relief and fever reduction. Please follow the label instructions and ask a pharmacist or doctor if you are unsure or symptoms continue."
+        : `${medicineName || "This medicine"} may be used for symptom relief depending on the product. Please read the label and ask a pharmacist or doctor if you are unsure, especially for children, pregnancy, chronic illness, or ongoing symptoms.`;
+
+    return {
+      reply,
+      intent: "GENERAL_HEALTH_INFO",
+      riskLevel: medicineSafety.requiresPrescription ? "MODERATE" : "LOW",
+      extracted,
+      suggestedActions: [buildPharmacySearchAction(extracted), buildDoctorSearchAction({ specialty })],
+    };
+  }
+
+  if (normalized.includes("antibiotic")) {
+    return {
+      reply:
+        "Antibiotics are not used for every fever and usually require a doctor’s review or valid prescription. I can help you book a doctor or open your prescriptions.",
+      intent: "GENERAL_HEALTH_INFO",
+      riskLevel: "MODERATE",
+      extracted,
+      suggestedActions: [buildDoctorSearchAction({ specialty }), buildOpenPrescriptionsAction()],
+      shouldBookDoctor: true,
+      doctorSearchSpecialty: specialty,
+    };
+  }
+
+  if (normalized.includes("cough")) {
+    return {
+      reply:
+        "A cough can happen for many reasons. Rest, fluids, and simple supportive care may help, but please see a doctor if it is persistent, severe, affects breathing, or you are worried about a child.",
+      intent: "GENERAL_HEALTH_INFO",
+      riskLevel: extracted.symptoms?.length ? "MODERATE" : "LOW",
+      extracted,
+      suggestedActions: [buildDoctorSearchAction({ specialty }), buildPharmacySearchAction(extracted)],
+      shouldBookDoctor: true,
+      doctorSearchSpecialty: specialty,
+    };
+  }
+
+  if (normalized.includes("which doctor") || normalized.includes("what doctor")) {
+    return {
+      reply: `${specialty} may be a good starting point for that concern. I can open doctor search for you.`,
+      intent: "BOOK_APPOINTMENT",
+      riskLevel: extracted.symptoms?.length ? "MODERATE" : "LOW",
+      extracted,
+      suggestedActions: [buildDoctorSearchAction({ specialty, symptoms: extracted.symptoms })],
+      shouldBookDoctor: true,
+      doctorSearchSpecialty: specialty,
+    };
+  }
+
+  if (intent === "APP_HELP") {
+    return {
+      reply:
+        "You can use HealthLink to search doctors, book appointments, track your live queue, open QR prescriptions, search pharmacy items, review orders, and view medical records.",
+      intent: "APP_HELP",
+      riskLevel: "NONE",
+      suggestedActions: [buildDoctorSearchAction(extracted), buildPharmacySearchAction(extracted), buildOpenPrescriptionsAction()],
+    };
+  }
+
+  if (intent === "UNKNOWN" || intent === "GENERAL_HEALTH_INFO") {
+    return {
+      reply:
+        "I’m not fully sure what you need. You can ask me to book a doctor, search pharmacy items, explain a prescription, check your queue, track medicine orders, or answer a simple health question.",
+      intent: "UNKNOWN",
+      riskLevel: extracted.symptoms?.length ? "LOW" : "NONE",
+      extracted,
+      suggestedActions: [buildDoctorSearchAction(extracted), buildPharmacySearchAction(extracted), buildOpenPrescriptionsAction()],
+    };
+  }
+
+  return null;
+};
+
+const shouldUseSmartReplyLayer = (
+  intent: AssistantResponse["intent"],
+  normalized: string,
+  extracted: AssistantExtractedEntities
+) =>
+  intent === "APP_HELP" ||
+  (intent === "GENERAL_HEALTH_INFO" && isExplanationStyleQuery(normalized)) ||
+  (intent === "UNKNOWN" &&
+    (isExplanationStyleQuery(normalized) ||
+      normalized.includes("?") ||
+      normalized.includes("prescription") ||
+      normalized.includes("stock"))) ||
+  ((intent === "PHARMACY_SEARCH" ||
+    intent === "MEDICINE_AVAILABILITY" ||
+    intent === "HEALTH_PRODUCT_GUIDANCE" ||
+    intent === "PRESCRIPTION_FULFILLMENT") &&
+    isExplanationStyleQuery(normalized)) ||
+  (Boolean(extracted.medicineName) && isExplanationStyleQuery(normalized));
 
 const BOOKING_FLOW_INTENTS = new Set<AssistantResponse["intent"]>([
   "BOOK_APPOINTMENT",
@@ -410,11 +613,11 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
 
   const detectedIntent = detectIntent(normalized, context.actionPayload);
   const ruleExtracted = buildBaseExtracted(normalized);
-  const ai = await parseMessageWithAI(context, state);
-  const extracted = mergeExtracted(mergeExtracted(buildStateExtracted(state), ruleExtracted), ai?.extracted);
-  const intent = resolveIntent(detectedIntent, state, extracted, ai?.intent);
+  const extracted = mergeExtracted(buildStateExtracted(state), ruleExtracted);
+  const intent = resolveIntent(detectedIntent, state, extracted);
   const riskLevel =
-    ai?.riskLevel || (intent === "GENERAL_HEALTH_INFO" || extracted.symptoms?.length ? classifyMedicalRisk(normalized) : "NONE");
+    intent === "GENERAL_HEALTH_INFO" || extracted.symptoms?.length ? classifyMedicalRisk(normalized) : "NONE";
+  const medicineSafety = classifyMedicineSafety(normalized, extracted.medicineName);
 
   if (!context.actionPayload && shouldContinueBookingFlow(state) && isNegativeResponse(normalized)) {
     clearConversationState(context.patientId, conversationId);
@@ -548,19 +751,6 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
     return buildSmallTalkResponse(conversationId);
   }
 
-  if (intent === "APP_HELP") {
-    return {
-      conversationId,
-      reply:
-        "I can help you book doctors, check queue status, view appointments, open prescriptions, search pharmacy items, track orders, and review medical records.",
-      intent,
-      riskLevel: "NONE",
-      extracted,
-      actions: [],
-      suggestions: ["Book a doctor", "Search pharmacy", "Show my prescriptions"],
-    };
-  }
-
   if (intent === "VIEW_QUEUE") {
     const queue = await getPatientQueueStatus(context.patientId);
     updateConversationState(context.patientId, conversationId, { lastIntent: intent, extracted });
@@ -630,13 +820,13 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
       conversationId,
       reply:
         options.length > 0
-          ? "You can open your prescriptions, choose an active prescription, and send it to a pharmacy for fulfilment."
-          : "Open your prescriptions to choose an active prescription and continue with pharmacy fulfilment.",
+          ? "Open Prescriptions, choose your active QR prescription, then send it to a pharmacy for fulfilment. I can take you there now."
+          : "Open your prescriptions to choose an active QR prescription and continue with pharmacy fulfilment.",
       intent,
       riskLevel: "NONE",
       extracted,
       actions: [
-        { type: "OPEN_PRESCRIPTIONS", label: "Open Prescriptions" },
+        buildOpenPrescriptionsAction(),
         {
           type: "OPEN_PRESCRIPTION_ORDER",
           label: "Start Prescription Order",
@@ -667,8 +857,109 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
     };
   }
 
+  if (shouldUseSmartReplyLayer(intent, normalized, extracted)) {
+    const healthlinkKnowledge = getHealthLinkKnowledgeContext();
+    const smartReply =
+      (await generateSmartAssistantReply({
+        message: context.message,
+        conversationSummary: buildConversationSummary(state),
+        healthlinkKnowledge,
+        currentIntent: intent,
+        extracted,
+        medicineSafety,
+      })) ||
+      buildHeuristicSmartReply({
+        normalized,
+        intent,
+        extracted,
+        medicineSafety,
+      });
+
+    if (smartReply) {
+      const smartExtracted = mergeExtracted(extracted, smartReply.extracted);
+      const smartIntent = smartReply.intent || intent;
+      const smartRiskLevel =
+        smartReply.riskLevel ||
+        (smartIntent === "GENERAL_HEALTH_INFO" || smartExtracted.symptoms?.length
+          ? classifyMedicalRisk(normalized)
+          : riskLevel);
+
+      const actions: AssistantAction[] = [...normalizeAiSuggestedActions(smartReply.suggestedActions)];
+      let medicineResults: AssistantResponse["medicineResults"];
+      let pharmacyResults: AssistantResponse["pharmacyResults"];
+
+      if (smartReply.shouldSearchMedicine && smartReply.medicineSearchQuery && !medicineSafety.requiresPrescription) {
+        medicineResults = await searchPharmacyProducts({
+          query: smartReply.medicineSearchQuery,
+          medicineName: smartExtracted.medicineName,
+          category: smartExtracted.medicineCategory,
+          symptom: smartExtracted.symptoms?.[0],
+          requiresPrescription: false,
+          limit: 6,
+        });
+        pharmacyResults = await searchPharmaciesWithProduct({
+          medicineName:
+            smartExtracted.medicineName || smartReply.medicineSearchQuery || smartExtracted.medicineCategory,
+        });
+
+        if (medicineResults.length > 0) {
+          actions.push({ type: "SHOW_MEDICINE_RESULTS", label: "Available items" });
+        }
+        if (pharmacyResults.length > 0) {
+          actions.push({ type: "SHOW_PHARMACY_RESULTS", label: "Matching pharmacies" });
+        }
+        actions.push(buildPharmacySearchAction(smartExtracted));
+      }
+
+      if (smartReply.shouldBookDoctor || smartReply.doctorSearchSpecialty) {
+        actions.push(
+          buildDoctorSearchAction({
+            specialty: smartReply.doctorSearchSpecialty || smartExtracted.specialty || "General Physician",
+            symptoms: smartExtracted.symptoms,
+          })
+        );
+      }
+
+      if (smartIntent === "PRESCRIPTION_FULFILLMENT") {
+        actions.push(buildOpenPrescriptionsAction());
+      }
+
+      if (smartIntent === "VIEW_MEDICAL_RECORDS") {
+        actions.push(buildOpenMedicalRecordsAction());
+      }
+
+      if (smartIntent === "PHARMACY_ORDER_STATUS") {
+        actions.push(buildOpenOrderStatusAction());
+      }
+
+      const finalActions = dedupeActions(actions);
+      updateConversationState(context.patientId, conversationId, {
+        lastIntent: smartIntent,
+        extracted: smartExtracted,
+        pendingBooking:
+          smartReply.shouldBookDoctor || smartIntent === "BOOK_APPOINTMENT"
+            ? { ...state.pendingBooking, ...smartExtracted }
+            : state.pendingBooking,
+      });
+
+      return {
+        conversationId,
+        reply: sanitizeAIHealthReply(smartReply.reply),
+        intent: smartIntent,
+        riskLevel: smartRiskLevel,
+        extracted: smartExtracted,
+        actions: finalActions,
+        suggestions:
+          finalActions.length > 0
+            ? finalActions.slice(0, 4).map((action) => action.label)
+            : ["Book a doctor", "Search pharmacy", "Show my prescriptions", "Ask a health question"],
+        ...(medicineResults ? { medicineResults } : {}),
+        ...(pharmacyResults ? { pharmacyResults } : {}),
+      };
+    }
+  }
+
   if (intent === "MEDICINE_AVAILABILITY" || intent === "PHARMACY_SEARCH" || intent === "HEALTH_PRODUCT_GUIDANCE") {
-    const medicineSafety = classifyMedicineSafety(normalized, extracted.medicineName);
     const pharmacyHint = inferPharmacyCategory(normalized);
     const pharmacyExtracted = mergeExtracted(extracted, {
       medicineCategory: extracted.medicineCategory || pharmacyHint?.category,
@@ -788,10 +1079,6 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
 
   if (intent === "BOOK_APPOINTMENT" || intent === "SEARCH_DOCTORS") {
     if (!extracted.specialty) {
-      const followUpQuestion =
-        ai?.needsFollowUp && ai.followUpQuestion
-          ? ai.followUpQuestion
-          : "Sure. What symptoms are you having, or what type of doctor do you need?";
       updateConversationState(context.patientId, conversationId, {
         lastIntent: "BOOK_APPOINTMENT",
         extracted,
@@ -799,7 +1086,7 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
       });
       return {
         conversationId,
-        reply: followUpQuestion,
+        reply: "Sure. What symptoms are you having, or what type of doctor do you need?",
         intent: "BOOK_APPOINTMENT",
         riskLevel: "NONE",
         extracted,
@@ -842,19 +1129,6 @@ export const handleAssistantMessage = async (context: AssistantRequestContext): 
             ]
           : [buildDoctorSearchAction(extracted)],
       suggestions: [`Find ${extracted.specialty}`, "Show available doctors", "View my appointments"],
-    };
-  }
-
-  if (intent === "UNKNOWN" && ai?.needsFollowUp && ai.followUpQuestion) {
-    updateConversationState(context.patientId, conversationId, { lastIntent: "UNKNOWN", extracted });
-    return {
-      conversationId,
-      reply: ai.followUpQuestion,
-      intent,
-      riskLevel: "NONE",
-      extracted,
-      actions: [{ type: "ASK_FOLLOW_UP", label: "Tell MediMate more" }],
-      suggestions: ["Book a doctor", "Search pharmacy", "Show my prescriptions"],
     };
   }
 

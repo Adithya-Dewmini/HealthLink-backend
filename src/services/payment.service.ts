@@ -49,7 +49,31 @@ export type CheckoutSession = {
   checkoutUrl: string;
   hostedUrl: string;
   hostedToken: string;
-  fields: Record<string, string>;
+  gatewayOrderId: string;
+  sandbox: boolean;
+  mode: "sandbox" | "live";
+  fields: PayHereCheckoutFields;
+};
+
+export type PayHereCheckoutFields = {
+  merchant_id: string;
+  return_url: string;
+  cancel_url: string;
+  notify_url: string;
+  order_id: string;
+  items: string;
+  currency: string;
+  amount: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone: string;
+  address: string;
+  city: string;
+  country: string;
+  custom_1: string;
+  custom_2: string;
+  hash: string;
 };
 
 export type PaymentStatusSummary = {
@@ -189,6 +213,7 @@ const getPaymentGatewayConfig = () => {
     returnUrl: env.payHereReturnUrl,
     cancelUrl: env.payHereCancelUrl,
     notifyUrl: env.payHereNotifyUrl,
+    mode: env.paymentGatewayMode === "live" ? ("live" as const) : ("sandbox" as const),
   };
 };
 
@@ -334,7 +359,7 @@ const buildPayHereCheckoutFields = (
     amount: number;
     currency: string;
   }
-) => {
+): PayHereCheckoutFields => {
   const { firstName, lastName } = splitPatientName(order.patient_name);
   const amount = formatGatewayAmount(payment.amount);
   const currency = payment.currency || order.currency || "LKR";
@@ -697,6 +722,9 @@ export const createCheckoutSession = async (
         hostedToken
       )}`,
       hostedToken,
+      gatewayOrderId,
+      sandbox: gatewayConfig.mode !== "live",
+      mode: gatewayConfig.mode,
       fields,
     };
   });

@@ -152,3 +152,15 @@ export type AssistantAiParseResult = {
   needsFollowUp?: boolean;
   followUpQuestion?: string;
 };
+
+export type AIChatResult = {
+  reply: string;
+  intent?: AssistantIntent;
+  riskLevel?: MedicalRiskLevel;
+  extracted?: AssistantExtractedEntities;
+  suggestedActions?: AssistantAction[];
+  shouldSearchMedicine?: boolean;
+  medicineSearchQuery?: string;
+  shouldBookDoctor?: boolean;
+  doctorSearchSpecialty?: string;
+};

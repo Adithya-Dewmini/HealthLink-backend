@@ -62,7 +62,7 @@ export const env = {
   geminiApiKey: optionalString("GEMINI_API_KEY"),
   aiAssistantEnabled: optionalBoolean("AI_ASSISTANT_ENABLED", false),
   openaiApiKey: optionalString("OPENAI_API_KEY"),
-  openaiModel: optionalString("OPENAI_MODEL") || "gpt-4.1-mini",
+  openaiModel: optionalString("OPENAI_MODEL") || "gpt-4o-mini",
   smtpHost: optionalString("SMTP_HOST"),
   smtpPort: optionalNumber("SMTP_PORT", 587) ?? 587,
   smtpSecure: optionalBoolean("SMTP_SECURE", false),

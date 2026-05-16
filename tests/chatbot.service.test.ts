@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { searchMarketplaceProducts } from "../src/modules/marketplace/service";
+import * as assistantAiClient from "../src/services/assistant/assistant.aiClient";
 import * as assistantTools from "../src/services/assistant/assistant.tools";
 import { classifyMedicineSafety } from "../src/services/assistant/assistant.medicineSafety";
 import { inferPharmacyCategory, normalizeMedicineQuery } from "../src/services/assistant/assistant.pharmacy";
@@ -246,6 +247,41 @@ describe("chatbot service", () => {
     expect(response.intent).toBe("GENERAL_HEALTH_INFO");
   });
 
+  it("what is paracetamol returns a useful safe answer when AI is disabled", async () => {
+    const response = await buildPatientChatbotResponse("What is paracetamol?", { patientId: "7" });
+
+    expect(response.intent).toBe("GENERAL_HEALTH_INFO");
+    expect(response.reply.toLowerCase()).toContain("pain relief");
+    expect(response.reply.toLowerCase()).toContain("general guidance only");
+    expect(response.actions.some((action) => action.type === "OPEN_PHARMACY_SEARCH")).toBe(true);
+  });
+
+  it("can I take antibiotics for fever returns doctor and prescription warning", async () => {
+    const response = await buildPatientChatbotResponse("Can I take antibiotics for fever?", { patientId: "7" });
+
+    expect(response.reply.toLowerCase()).toContain("doctor");
+    expect(response.reply.toLowerCase()).toContain("prescription");
+    expect(response.actions.some((action) => action.type === "OPEN_DOCTOR_SEARCH")).toBe(true);
+    expect(response.actions.some((action) => action.type === "OPEN_PRESCRIPTIONS")).toBe(true);
+    expect(response.actions.some((action) => action.type === "CONFIRM_ADD_TO_CART")).toBe(false);
+  });
+
+  it("how do I use QR prescription returns app help and open prescriptions", async () => {
+    const response = await buildPatientChatbotResponse("How do I use QR prescription?", { patientId: "7" });
+
+    expect(response.intent).toBe("PRESCRIPTION_FULFILLMENT");
+    expect(response.reply.toLowerCase()).toContain("qr prescription");
+    expect(response.actions.some((action) => action.type === "OPEN_PRESCRIPTIONS")).toBe(true);
+  });
+
+  it("what does low stock mean returns pharmacy app help", async () => {
+    const response = await buildPatientChatbotResponse("What does low stock mean?", { patientId: "7" });
+
+    expect(response.intent).toBe("APP_HELP");
+    expect(response.reply.toLowerCase()).toContain("small quantity");
+    expect(response.actions.some((action) => action.type === "OPEN_PHARMACY_SEARCH")).toBe(true);
+  });
+
   it("Do you have paracetamol? returns pharmacy search results", async () => {
     const response = await buildPatientChatbotResponse("Do you have paracetamol?", { patientId: "7" });
     expect(["MEDICINE_AVAILABILITY", "PHARMACY_SEARCH"]).toContain(response.intent);
@@ -369,5 +405,80 @@ describe("chatbot service", () => {
     });
     expect(response.riskLevel).toBe("URGENT");
     expect(response.medicineResults ?? []).toHaveLength(0);
+  });
+
+  it("mocked AI can trigger medicine search through backend tools", async () => {
+    const aiSpy = vi.spyOn(assistantAiClient, "generateSmartAssistantReply").mockResolvedValueOnce({
+      reply: "I found some pharmacy items that may match your request.",
+      intent: "MEDICINE_AVAILABILITY",
+      shouldSearchMedicine: true,
+      medicineSearchQuery: "paracetamol",
+      extracted: { medicineName: "paracetamol" },
+      suggestedActions: [{ type: "OPEN_PHARMACY_SEARCH", label: "Search Pharmacy" }],
+    });
+    const medicineSpy = vi.spyOn(assistantTools, "searchPharmacyProducts").mockResolvedValueOnce([
+      {
+        productId: "101",
+        medicineName: "Paracetamol 500mg Tablet",
+        genericName: "Paracetamol",
+        stockStatus: "IN_STOCK",
+        requiresPrescription: false,
+      },
+    ]);
+    const pharmacySpy = vi.spyOn(assistantTools, "searchPharmaciesWithProduct").mockResolvedValueOnce([]);
+
+    const response = await buildPatientChatbotResponse("Can you find paracetamol for me?", { patientId: "7" });
+
+    expect(medicineSpy).toHaveBeenCalled();
+    expect(response.medicineResults?.length).toBe(1);
+    expect(response.actions.some((action) => action.type === "SHOW_MEDICINE_RESULTS")).toBe(true);
+
+    pharmacySpy.mockRestore();
+    medicineSpy.mockRestore();
+    aiSpy.mockRestore();
+  });
+
+  it("unsafe AI suggested add to cart action is rejected", async () => {
+    const aiSpy = vi.spyOn(assistantAiClient, "generateSmartAssistantReply").mockResolvedValueOnce({
+      reply: "I can help with that medicine.",
+      intent: "GENERAL_HEALTH_INFO",
+      suggestedActions: [
+        { type: "ADD_TO_CART" as never, label: "Add to Cart" },
+        { type: "OPEN_PHARMACY_SEARCH", label: "Search Pharmacy" },
+      ],
+    });
+
+    const response = await buildPatientChatbotResponse("What is paracetamol?", { patientId: "7" });
+
+    expect(response.actions.some((action) => action.type === "ADD_TO_CART")).toBe(false);
+    expect(response.actions.some((action) => action.type === "OPEN_PHARMACY_SEARCH")).toBe(true);
+
+    aiSpy.mockRestore();
+  });
+
+  it("AI fallback still works when AI returns null", async () => {
+    const aiSpy = vi.spyOn(assistantAiClient, "generateSmartAssistantReply").mockResolvedValueOnce(null);
+
+    const response = await buildPatientChatbotResponse("What is paracetamol?", { patientId: "7" });
+
+    expect(response.reply.toLowerCase()).toContain("paracetamol");
+    expect(response.reply.toLowerCase()).toContain("pain relief");
+
+    aiSpy.mockRestore();
+  });
+
+  it("AI dosage-style reply is sanitized", async () => {
+    const aiSpy = vi.spyOn(assistantAiClient, "generateSmartAssistantReply").mockResolvedValueOnce({
+      reply: "You should take 500 mg every 6 hours for fever.",
+      intent: "GENERAL_HEALTH_INFO",
+    });
+
+    const response = await buildPatientChatbotResponse("What is paracetamol?", { patientId: "7" });
+
+    expect(response.reply.toLowerCase()).toContain("please follow the medicine label");
+    expect(response.reply.toLowerCase()).not.toContain("500 mg");
+    expect(response.reply.toLowerCase()).not.toContain("every 6 hours");
+
+    aiSpy.mockRestore();
   });
 });

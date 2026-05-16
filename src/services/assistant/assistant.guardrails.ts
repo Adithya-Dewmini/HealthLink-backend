@@ -59,6 +59,34 @@ export const sanitizeMedicalReply = (reply: string) =>
       .trim()
   );
 
+export const sanitizeAIHealthReply = (reply: string) => {
+  const normalized = String(reply || "").trim();
+  if (!normalized) {
+    return addHealthDisclaimer("I can share simple health guidance only.");
+  }
+
+  const softened = normalized
+    .replace(/\byou have\b/gi, "this may be")
+    .replace(/\byou likely have\b/gi, "this may be")
+    .replace(/\byou should take\b/gi, "please consult a pharmacist or doctor for correct use")
+    .replace(/\btake\s+\d+(?:\.\d+)?\s?(?:mg|ml|g|mcg)\b/gi, "please follow the medicine label and consult a pharmacist or doctor for correct use")
+    .replace(/\bevery\s+\d+\s*(?:hour|hours|hr|hrs)\b/gi, "as advised by a pharmacist or doctor")
+    .replace(/\bthis will cure\b/gi, "this may help some symptoms, but please consult a doctor if needed")
+    .replace(/\bdiagnosis\b/gi, "assessment");
+
+  if (
+    /\b(take\s+\d+(?:\.\d+)?\s?(?:mg|ml|g|mcg)|every\s+\d+\s*(?:hour|hours|hr|hrs)|you should take)\b/i.test(
+      normalized
+    )
+  ) {
+    return addHealthDisclaimer(
+      "Please follow the medicine label and consult a pharmacist or doctor for correct use."
+    );
+  }
+
+  return addHealthDisclaimer(softened);
+};
+
 export const buildEmergencyResponse = (conversationId: string): AssistantResponse => ({
   conversationId,
   reply:
