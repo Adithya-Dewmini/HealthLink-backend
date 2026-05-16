@@ -699,7 +699,7 @@ export const checkoutCart = async (patientId: number, input: CheckoutInput) =>
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'LKR', $7, $8, $9, $10::jsonb, $11, $12, $13, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, 'LKR', $7, $8, $9, $10, $11::jsonb, $12, $13, $14, NOW(), NOW())
         RETURNING id
       `,
       [
