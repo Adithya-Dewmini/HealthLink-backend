@@ -5,6 +5,7 @@ import {
   createCheckoutSession,
   getHostedCheckoutHtml,
   getOrderInvoice,
+  getPublicPaymentRedirectStatus,
   getPaymentStatus,
   updatePaymentFromGatewayNotification,
 } from "../services/payment.service";
@@ -205,6 +206,26 @@ export const getPharmacyOrderPaymentStatusController = async (
   }
 };
 
+export const getPayHereRedirectStatusController = async (req: Request, res: Response) => {
+  try {
+    const orderId = parseOrderId(req.params.orderId);
+    const gatewayOrderId = String(req.query.gatewayOrderId || req.query.order_id || "").trim() || null;
+    const paymentIdRaw = String(req.query.paymentId || req.query.payment_id || "").trim();
+    const paymentId = paymentIdRaw ? parseOrderId(paymentIdRaw, "payment id") : null;
+
+    const status = await getPublicPaymentRedirectStatus({
+      orderId,
+      gatewayOrderId,
+      paymentId,
+      source: "payhere_return_page",
+    });
+
+    return res.status(200).json(status);
+  } catch (error) {
+    return handleError(res, error, "Failed to load public payment redirect status");
+  }
+};
+
 export const getOrderInvoiceController = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const actor = requireAuthenticatedUser(req);
@@ -266,6 +287,17 @@ export const getPayHereHostedCheckoutController = async (req: Request, res: Resp
 export const payHereNotifyController = async (req: Request, res: Response) => {
   try {
     const result = await updatePaymentFromGatewayNotification(req.body || {});
+
+    console.info("[payments] PayHere notify controller result", {
+      processed: result.processed,
+      ignoredReason: result.ignoredReason ?? null,
+      orderId: result.orderId ?? null,
+      paymentId: result.paymentId ?? null,
+      patientId: result.patientId ?? null,
+      pharmacyId: result.pharmacyId ?? null,
+      paymentStatus: result.paymentStatus ?? null,
+      invoiceNo: result.invoiceNo ?? null,
+    });
 
     if (result.processed && result.orderId && result.patientId && result.pharmacyId && result.paymentId) {
       const [order, paymentStatus] = await Promise.all([

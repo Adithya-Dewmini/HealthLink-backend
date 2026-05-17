@@ -193,6 +193,13 @@ export type NotificationUpdateResult = {
   invoiceNo?: string | null;
 };
 
+export type PublicPaymentRedirectStatusContext = {
+  orderId: number;
+  gatewayOrderId?: string | null;
+  paymentId?: number | null;
+  source?: string | null;
+};
+
 const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2));
 
 const formatGatewayAmount = (value: number) => normalizeMoney(value).toFixed(2);
@@ -434,6 +441,55 @@ const buildPaymentStatusMessage = (input: {
   }
 
   return "Payment confirmation is still pending.";
+};
+
+const buildPaymentStatusSummary = async (
+  client: PoolClient,
+  orderId: number
+): Promise<PaymentStatusSummary> => {
+  const order = await getGatewayOrderRecord(client, orderId);
+  const paymentRow = await loadLatestPaymentRow(client, orderId);
+  const invoice = await loadInvoiceSummary(client, orderId);
+  const paymentMethod = order.payment_method ?? null;
+  const paymentStatus = (order.payment_status ?? paymentRow?.status ?? null) as PaymentStatus | null;
+  const updatedAtSource = paymentRow?.updated_at ?? order.updated_at ?? order.paid_at ?? order.created_at ?? null;
+
+  return {
+    orderId,
+    orderStatus: order.status,
+    paymentMethod,
+    paymentStatus,
+    paidAt: order.paid_at ? new Date(order.paid_at).toISOString() : null,
+    amount: normalizeMoney(order.total),
+    currency: order.currency || "LKR",
+    gatewayPaymentId: paymentRow?.gateway_payment_id ?? null,
+    invoiceId: invoice?.id ?? null,
+    invoiceNo: invoice?.invoiceNo ?? null,
+    updatedAt: updatedAtSource ? new Date(updatedAtSource).toISOString() : null,
+    message: buildPaymentStatusMessage({
+      paymentMethod,
+      paymentStatus,
+      invoiceNo: invoice?.invoiceNo ?? null,
+    }),
+    payment: paymentRow
+      ? {
+          id: Number(paymentRow.id),
+          gateway: paymentRow.gateway,
+          gatewayPaymentId: paymentRow.gateway_payment_id ?? null,
+          gatewayOrderId: paymentRow.gateway_order_id ?? null,
+          amount: normalizeMoney(paymentRow.amount),
+          currency: paymentRow.currency ?? order.currency ?? "LKR",
+          status: paymentRow.status,
+          method: paymentRow.method ?? null,
+          cardNoMasked: paymentRow.card_no_masked ?? null,
+          statusMessage: paymentRow.status_message ?? null,
+          verifiedAt: paymentRow.verified_at ? new Date(paymentRow.verified_at).toISOString() : null,
+          createdAt: new Date(paymentRow.created_at).toISOString(),
+          updatedAt: new Date(paymentRow.updated_at).toISOString(),
+        }
+      : null,
+    invoice,
+  };
 };
 
 const withTransaction = async <T>(callback: (client: PoolClient) => Promise<T>) => {
@@ -983,6 +1039,17 @@ export const updatePaymentFromGatewayNotification = async (
   payload: Record<string, unknown>
 ): Promise<NotificationUpdateResult> =>
   withTransaction(async (client) => {
+    console.info("[payments] PayHere notify received", {
+      merchant_id: payload.merchant_id ?? null,
+      order_id: payload.order_id ?? null,
+      payment_id: payload.payment_id ?? null,
+      status_code: payload.status_code ?? null,
+      payhere_amount: payload.payhere_amount ?? null,
+      payhere_currency: payload.payhere_currency ?? null,
+      custom_1: payload.custom_1 ?? null,
+      custom_2: payload.custom_2 ?? null,
+    });
+
     const verification = verifyPayHereNotification(payload);
     if (!verification.isValid) {
       console.warn("[payments] ignored PayHere notify:", verification.reason);
@@ -1026,6 +1093,11 @@ export const updatePaymentFromGatewayNotification = async (
       String(paymentRow.status || "").toLowerCase()
     );
     if (alreadyTerminal && String(paymentRow.status || "").toLowerCase() === nextPaymentStatus) {
+      console.info("[payments] PayHere notify matched existing terminal payment", {
+        orderId: Number(paymentRow.order_id),
+        paymentId: Number(paymentRow.id),
+        paymentStatus: nextPaymentStatus,
+      });
       const existingInvoice = await loadInvoiceSummary(client, Number(paymentRow.order_id));
       return {
         processed: true,
@@ -1038,6 +1110,16 @@ export const updatePaymentFromGatewayNotification = async (
         invoiceNo: existingInvoice?.invoiceNo ?? null,
       };
     }
+
+    console.info("[payments] Applying PayHere notify status update", {
+      orderId: Number(paymentRow.order_id),
+      paymentId: Number(paymentRow.id),
+      previousPaymentStatus: String(paymentRow.status || "").toLowerCase() || null,
+      nextPaymentStatus,
+      gatewayOrderId: verification.gatewayOrderId,
+      amount: verification.amount,
+      currency: verification.currency,
+    });
 
     await client.query(
       `
@@ -1095,6 +1177,14 @@ export const updatePaymentFromGatewayNotification = async (
       );
     }
 
+    console.info("[payments] PayHere notify processed", {
+      orderId: Number(paymentRow.order_id),
+      paymentId: Number(paymentRow.id),
+      paymentStatus: nextPaymentStatus,
+      invoiceId: invoice?.id ?? null,
+      invoiceNo: invoice?.invoiceNo ?? null,
+    });
+
     return {
       processed: true,
       orderId: Number(paymentRow.order_id),
@@ -1130,48 +1220,46 @@ export const getPaymentStatus = async (
       throw new HttpError(403, "You do not have access to this payment");
     }
 
-    const paymentRow = await loadLatestPaymentRow(client, orderId);
-    const invoice = await loadInvoiceSummary(client, orderId);
-    const paymentMethod = order.payment_method ?? null;
-    const paymentStatus = (order.payment_status ?? paymentRow?.status ?? null) as PaymentStatus | null;
-    const updatedAtSource = paymentRow?.updated_at ?? order.updated_at ?? order.paid_at ?? order.created_at ?? null;
-
-    return {
+    const summary = await buildPaymentStatusSummary(client, orderId);
+    console.info("[payments] Authenticated payment status lookup", {
       orderId,
-      orderStatus: order.status,
-      paymentMethod,
-      paymentStatus,
-      paidAt: order.paid_at ? new Date(order.paid_at).toISOString() : null,
-      amount: normalizeMoney(order.total),
-      currency: order.currency || "LKR",
-      gatewayPaymentId: paymentRow?.gateway_payment_id ?? null,
-      invoiceId: invoice?.id ?? null,
-      invoiceNo: invoice?.invoiceNo ?? null,
-      updatedAt: updatedAtSource ? new Date(updatedAtSource).toISOString() : null,
-      message: buildPaymentStatusMessage({
-        paymentMethod,
-        paymentStatus,
-        invoiceNo: invoice?.invoiceNo ?? null,
-      }),
-      payment: paymentRow
-        ? {
-            id: Number(paymentRow.id),
-            gateway: paymentRow.gateway,
-            gatewayPaymentId: paymentRow.gateway_payment_id ?? null,
-            gatewayOrderId: paymentRow.gateway_order_id ?? null,
-            amount: normalizeMoney(paymentRow.amount),
-            currency: paymentRow.currency ?? order.currency ?? "LKR",
-            status: paymentRow.status,
-            method: paymentRow.method ?? null,
-            cardNoMasked: paymentRow.card_no_masked ?? null,
-            statusMessage: paymentRow.status_message ?? null,
-            verifiedAt: paymentRow.verified_at ? new Date(paymentRow.verified_at).toISOString() : null,
-            createdAt: new Date(paymentRow.created_at).toISOString(),
-            updatedAt: new Date(paymentRow.updated_at).toISOString(),
-          }
-        : null,
-      invoice,
-    };
+      actorUserId: actor.userId,
+      actorRole: role,
+      paymentStatus: summary.paymentStatus,
+      gatewayPaymentId: summary.gatewayPaymentId,
+      invoiceNo: summary.invoiceNo,
+    });
+    return summary;
+  });
+
+export const getPublicPaymentRedirectStatus = async (
+  input: PublicPaymentRedirectStatusContext
+): Promise<PaymentStatusSummary> =>
+  withTransaction(async (client) => {
+    const order = await getGatewayOrderRecord(client, input.orderId);
+    const paymentRow = await loadLatestPaymentRow(client, input.orderId);
+    const normalizedGatewayOrderId = String(input.gatewayOrderId || "").trim();
+    const normalizedPaymentId = Number(input.paymentId ?? 0);
+
+    if (normalizedGatewayOrderId && paymentRow?.gateway_order_id && normalizedGatewayOrderId !== String(paymentRow.gateway_order_id)) {
+      throw new HttpError(403, "Return page parameters do not match this payment");
+    }
+
+    if (normalizedPaymentId && Number(paymentRow?.id ?? 0) !== normalizedPaymentId) {
+      throw new HttpError(403, "Return page parameters do not match this payment");
+    }
+
+    const summary = await buildPaymentStatusSummary(client, input.orderId);
+    console.info("[payments] Public redirect status lookup", {
+      orderId: input.orderId,
+      paymentId: normalizedPaymentId || null,
+      gatewayOrderId: normalizedGatewayOrderId || null,
+      source: input.source || null,
+      paymentStatus: summary.paymentStatus,
+      gatewayPaymentId: summary.gatewayPaymentId,
+      invoiceNo: summary.invoiceNo,
+    });
+    return summary;
   });
 
 export const getOrderInvoice = async (
