@@ -253,9 +253,12 @@ export const getPatientActiveQueueState = async (
     ) ?? null;
 
   if (missedQueueBooking && isTodayDate(missedQueueBooking.date)) {
+    const queueEnded = isQueueEnded(missedQueueBooking.queue_status);
     return toPatientQueuePayload(missedQueueBooking, "missed", {
       checkInState: "missed",
-      message: "This appointment was marked missed.",
+      message: queueEnded
+        ? "Today's clinic queue has ended. Please contact reception."
+        : "This appointment was marked missed. Please contact reception.",
     });
   }
 
@@ -271,7 +274,7 @@ export const getPatientActiveQueueState = async (
     return toPatientQueuePayload(endedQueueBooking, "missed", {
       active: false,
       checkInState: "missed",
-      message: "Today's clinic queue has ended.",
+      message: "Today's clinic queue has ended. Please contact reception.",
     });
   }
 
