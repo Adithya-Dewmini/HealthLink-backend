@@ -23,7 +23,7 @@ type MedicineBody = {
   medicines?: any[];
 };
 
-type HttpError = Error & { statusCode?: number; conflicts?: unknown };
+type HttpError = Error & { statusCode?: number; conflicts?: unknown; code?: string };
 
 const requireDoctorUser = (req: AuthenticatedRequest) => {
   const userId = req.user?.id;
@@ -48,6 +48,9 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
   const payload: Record<string, unknown> = {
     message: appError?.message || fallbackMessage,
   };
+  if (typeof appError?.code === "string" && appError.code.trim()) {
+    payload.code = appError.code;
+  }
 
   if (appError?.conflicts) {
     payload.conflicts = appError.conflicts;
@@ -74,7 +77,7 @@ export const getDoctorConsultation = async (req: AuthenticatedRequest, res: Resp
     const userId = requireDoctorUser(req);
     const queueId = Number(req.params.queueId);
     if (!queueId) {
-      return res.status(400).json({ message: "queueId is required" });
+      return res.status(400).json({ message: "queueId is required", code: "QUEUE_NOT_FOUND" });
     }
 
     const context = await getDoctorConsultationContext(queueId, userId);
@@ -94,7 +97,7 @@ export const createConsultation = async (
     const { patientId, queueId, symptoms, diagnosis, notes, medicines } = req.body || {};
 
     if (!patientId) {
-      return res.status(400).json({ message: "patientId is required" });
+      return res.status(400).json({ message: "patientId is required", code: "PATIENT_NOT_CALLED" });
     }
 
     const consultation = await createConsultationRecord({

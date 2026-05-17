@@ -234,6 +234,8 @@ const normalizeInvoice = (row: DbRecord | undefined | null): InvoiceSummary | nu
   return {
     id: Number(row.id),
     invoiceNo: row.invoice_no,
+    amount: normalizeMoney(row.total),
+    status: "issued",
     subtotal: normalizeMoney(row.subtotal),
     deliveryFee: normalizeMoney(row.delivery_fee),
     serviceFee: normalizeMoney(row.service_fee),
@@ -242,6 +244,8 @@ const normalizeInvoice = (row: DbRecord | undefined | null): InvoiceSummary | nu
     currency: row.currency ?? "LKR",
     pdfUrl: row.pdf_url ?? null,
     issuedAt: new Date(row.issued_at).toISOString(),
+    emailedAt: row.emailed_at ? new Date(row.emailed_at).toISOString() : null,
+    emailTo: row.email_to ?? null,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   };

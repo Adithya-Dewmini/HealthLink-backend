@@ -16,14 +16,15 @@ import { createPrescriptionQrToken, ensurePrescriptionQrToken } from "./prescrip
 const doctorRoom = (doctorId: number | string) => `doctor-${doctorId}`;
 const receptionRoom = "reception";
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; code?: string };
 type Queryable = {
   query: <TRow = any>(text: string, params?: unknown[]) => Promise<{ rows: TRow[] }>;
 };
 
-const createStatusError = (message: string, statusCode: number) => {
+const createStatusError = (message: string, statusCode: number, code?: string) => {
   const error = new Error(message) as HttpError;
   error.statusCode = statusCode;
+  error.code = code;
   return error;
 };
 
@@ -147,7 +148,7 @@ const requireDoctorProfile = async (client: PoolClient | typeof pool, userId: nu
   );
 
   if (doctorResult.rows.length === 0) {
-    throw createStatusError("Doctor profile not found", 400);
+    throw createStatusError("Doctor profile not found", 400, "DOCTOR_NOT_ASSIGNED");
   }
 
   return doctorResult.rows[0];
@@ -188,7 +189,11 @@ const ensureQueuePatientContext = async (
 
   const row = result.rows[0];
   if (!row) {
-    throw createStatusError("No active consultation patient found for this doctor and queue", 409);
+    throw createStatusError(
+      "No active consultation patient found for this doctor and queue",
+      409,
+      "PATIENT_NOT_CALLED"
+    );
   }
 
   return row;
@@ -257,7 +262,7 @@ export const getDoctorConsultationContext = async (queueId: number, doctorUserId
   );
 
   if (currentPatientResult.rows.length === 0) {
-    throw createStatusError("No active patient for this queue", 404);
+    throw createStatusError("No active patient for this queue", 404, "PATIENT_NOT_CALLED");
   }
 
   const patientRow = currentPatientResult.rows[0];
@@ -365,7 +370,7 @@ export const createConsultationRecord = async (options: {
   if (medicines !== undefined) {
     const validationError = validateMedicines(medicines, false);
     if (validationError) {
-      throw createStatusError(validationError, 400);
+      throw createStatusError(validationError, 400, "PRESCRIPTION_REQUIRED_FIELDS");
     }
   }
 
@@ -443,7 +448,7 @@ export const createConsultationRecord = async (options: {
 export const updateConsultationMedicines = async (consultationId: string, medicines: any[]) => {
   const validationError = validateMedicines(medicines, false);
   if (validationError) {
-    throw createStatusError(validationError, 400);
+    throw createStatusError(validationError, 400, "PRESCRIPTION_REQUIRED_FIELDS");
   }
 
   const result = await pool.query(
@@ -472,7 +477,7 @@ export const updateConsultationRecord = async (options: {
   if (medicines !== undefined) {
     const validationError = validateMedicines(medicines, true);
     if (validationError) {
-      throw createStatusError(validationError, 400);
+      throw createStatusError(validationError, 400, "PRESCRIPTION_REQUIRED_FIELDS");
     }
   }
 
@@ -487,7 +492,7 @@ export const updateConsultationRecord = async (options: {
   );
 
   if (currentResult.rows.length === 0) {
-    throw createStatusError("Consultation not found", 404);
+    throw createStatusError("Consultation not found", 404, "CONSULTATION_NOT_FOUND");
   }
 
   let consultation = currentResult.rows[0];
@@ -501,7 +506,7 @@ export const updateConsultationRecord = async (options: {
   }
 
   if (String(consultation.status || "").toLowerCase() === "completed") {
-    throw createStatusError("Consultation is already completed", 409);
+    throw createStatusError("Consultation is already completed", 409, "CONSULTATION_ALREADY_COMPLETED");
   }
 
   if (consultation.queue_id) {
@@ -563,7 +568,7 @@ const ensureDoctorOwnsConsultation = async (
       return normalized.rows[0] ?? consultation;
     }
 
-    throw createStatusError("Not your consultation", 403);
+    throw createStatusError("Not your consultation", 403, "NOT_ALLOWED");
   }
 
   const assigned = await client.query(
@@ -732,18 +737,18 @@ export const issuePrescriptionForConsultationRecord = async (
     );
 
     if (consultationResult.rows.length === 0) {
-      throw createStatusError("Consultation not found", 404);
+      throw createStatusError("Consultation not found", 404, "CONSULTATION_NOT_FOUND");
     }
 
     let consultation = consultationResult.rows[0];
     consultation = await ensureDoctorOwnsConsultation(client, consultation, userId);
 
     if (String(consultation.status || "").toLowerCase() === "completed") {
-      throw createStatusError("Consultation is already completed", 409);
+      throw createStatusError("Consultation is already completed", 409, "CONSULTATION_ALREADY_COMPLETED");
     }
 
     if (!consultation.queue_id || !consultation.patient_id) {
-      throw createStatusError("Consultation is not linked to an active queue entry", 409);
+      throw createStatusError("Consultation is not linked to an active queue entry", 409, "PATIENT_NOT_CALLED");
     }
 
     const queueContext = await ensureQueuePatientContext(client, {
@@ -753,7 +758,7 @@ export const issuePrescriptionForConsultationRecord = async (
     });
 
     if (queueContext.consultation_id && String(queueContext.consultation_id) !== String(consultation.id)) {
-      throw createStatusError("Queue entry is linked to a different consultation", 409);
+      throw createStatusError("Queue entry is linked to a different consultation", 409, "PATIENT_NOT_CALLED");
     }
 
     const medsFromBody = Array.isArray(medicines) ? medicines : null;
@@ -762,11 +767,15 @@ export const issuePrescriptionForConsultationRecord = async (
 
     const validationError = validateMedicines(meds, true);
     if (validationError) {
-      throw createStatusError(validationError, 400);
+      throw createStatusError(validationError, 400, "PRESCRIPTION_REQUIRED_FIELDS");
     }
 
     if (!Array.isArray(meds) || meds.length === 0) {
-      throw createStatusError("Add at least one medicine before completing this consultation", 400);
+      throw createStatusError(
+        "Add at least one medicine before completing this consultation",
+        400,
+        "PRESCRIPTION_REQUIRED_FIELDS"
+      );
     }
 
     const conflictList = await findMedicineConflicts(
@@ -885,18 +894,18 @@ export const completeConsultationRecord = async (
     );
 
     if (consultationResult.rows.length === 0) {
-      throw createStatusError("Consultation not found", 404);
+      throw createStatusError("Consultation not found", 404, "CONSULTATION_NOT_FOUND");
     }
 
     let consultation = consultationResult.rows[0];
     consultation = await ensureDoctorOwnsConsultation(client, consultation, userId);
 
     if (String(consultation.status || "").toLowerCase() === "completed") {
-      throw createStatusError("Consultation is already completed", 409);
+      throw createStatusError("Consultation is already completed", 409, "CONSULTATION_ALREADY_COMPLETED");
     }
 
     if (!consultation.queue_id || !consultation.patient_id) {
-      throw createStatusError("Consultation is not linked to an active queue entry", 409);
+      throw createStatusError("Consultation is not linked to an active queue entry", 409, "PATIENT_NOT_CALLED");
     }
 
     const queueContext = await ensureQueuePatientContext(client, {
@@ -909,7 +918,7 @@ export const completeConsultationRecord = async (
       queueContext.consultation_id &&
       String(queueContext.consultation_id) !== String(consultation.id)
     ) {
-      throw createStatusError("Queue entry is linked to a different consultation", 409);
+      throw createStatusError("Queue entry is linked to a different consultation", 409, "PATIENT_NOT_CALLED");
     }
 
     const medsFromBody = Array.isArray(medicines) ? medicines : null;
@@ -919,7 +928,7 @@ export const completeConsultationRecord = async (
     if (meds.length > 0) {
       const validationError = validateMedicines(meds, true);
       if (validationError) {
-        throw createStatusError(validationError, 400);
+        throw createStatusError(validationError, 400, "PRESCRIPTION_REQUIRED_FIELDS");
       }
 
       const conflictList = await findMedicineConflicts(

@@ -10,7 +10,7 @@ import { validateBookingSlot } from "../modules/appointments/validation";
 import { bookUnifiedSession, resolveSessionIdForBooking } from "./unifiedSession.service";
 import { assertVerifiedClinic, assertVerifiedDoctorProfileOnly } from "./verification.service";
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; code?: string };
 
 type ScheduleRow = {
   id: number;
@@ -49,8 +49,10 @@ type PatientBookingRow = BookingRecord & {
   queue_token_number?: number | null;
   queue_checked_in_at?: string | null;
   queue_missed_at?: string | null;
+  consultation_status?: string | null;
   current_serving_token?: number | null;
   waiting_count?: number | null;
+  is_late?: boolean;
 };
 
 type PatientActiveQueueOptions = {
@@ -58,9 +60,10 @@ type PatientActiveQueueOptions = {
   sessionId?: number | null;
 };
 
-const createStatusError = (message: string, statusCode: number) => {
+const createStatusError = (message: string, statusCode: number, code?: string) => {
   const error = new Error(message) as HttpError;
   error.statusCode = statusCode;
+  error.code = code;
   return error;
 };
 
@@ -101,6 +104,9 @@ const isQueuePatientActive = (status?: string | null) =>
 
 const isQueueLive = (status?: string | null) =>
   ["LIVE", "PAUSED"].includes(String(status || "").trim().toUpperCase());
+
+const isConsultationActive = (status?: string | null) =>
+  ["ACTIVE", "IN_PROGRESS"].includes(String(status || "").trim().toUpperCase());
 
 const isTodayDate = (value?: string | null) => {
   if (!value) return false;
@@ -163,6 +169,7 @@ const toPatientQueuePayload = (
     queueStarted: isQueueLive(booking.queue_status),
     queueStatus: booking.queue_status ?? null,
     patientQueueStatus: booking.queue_patient_status ?? null,
+    consultationStatus: booking.consultation_status ?? null,
     tokenNumber,
     queueNumber: tokenNumber,
     currentServingNumber,
@@ -196,7 +203,7 @@ export const getPatientActiveQueueState = async (
   });
 
   if ((options.appointmentId || options.sessionId) && scopedBookings.length === 0) {
-    throw createStatusError("Appointment queue details not found", 404);
+    throw createStatusError("Appointment queue details not found", 404, "QUEUE_NOT_FOUND");
   }
 
   const activeQueueBooking =
@@ -208,21 +215,30 @@ export const getPatientActiveQueueState = async (
 
   if (activeQueueBooking) {
     const patientQueueStatus = String(activeQueueBooking.queue_patient_status || "").toUpperCase();
+    const consultationStatus = String(activeQueueBooking.consultation_status || "").toUpperCase();
     const currentServingNumber = Number(activeQueueBooking.current_serving_token ?? 0) || 0;
     const tokenNumber = Number(activeQueueBooking.queue_token_number ?? 0) || 0;
     const status =
       patientQueueStatus === "MISSED"
         ? "missed"
-        : patientQueueStatus === "WITH_DOCTOR" || (tokenNumber > 0 && tokenNumber <= currentServingNumber + 1)
-          ? "next"
+        : patientQueueStatus === "WITH_DOCTOR" && isConsultationActive(consultationStatus)
+          ? "in_consultation"
+          : patientQueueStatus === "WITH_DOCTOR"
+            ? "called"
+            : tokenNumber > 0 && tokenNumber <= currentServingNumber + 1
+              ? "next"
           : "waiting";
 
     return toPatientQueuePayload(activeQueueBooking, status, {
       checkInState: "checked_in",
       message:
         status === "next"
-          ? "Your turn is close. Please stay near the consultation room."
-          : "Queue is active for this appointment.",
+          ? "You are next. Please stay nearby."
+          : status === "called"
+            ? "Doctor is ready for you. Please enter the consultation room."
+            : status === "in_consultation"
+              ? "Consultation in progress."
+              : "You are checked in. Please wait for your turn.",
     });
   }
 
@@ -250,16 +266,23 @@ export const getPatientActiveQueueState = async (
     ) ?? null;
 
   if (liveButNotCheckedInBooking) {
+    if (Boolean(liveButNotCheckedInBooking.is_late)) {
+      return toPatientQueuePayload(liveButNotCheckedInBooking, "late", {
+        checkInState: "late",
+        message: "You are marked late. Please contact reception.",
+      });
+    }
+
     const bookingStatus = normalizeBookingStatus(liveButNotCheckedInBooking.status);
     return toPatientQueuePayload(
       liveButNotCheckedInBooking,
-      bookingStatus === BOOKING_STATUS.CONFIRMED ? "check_in_required" : "queue_live",
+      bookingStatus === BOOKING_STATUS.CONFIRMED ? "check_in_required" : "not_arrived",
       {
         checkInState: bookingStatus === BOOKING_STATUS.CONFIRMED ? "pending" : "required",
         message:
           bookingStatus === BOOKING_STATUS.CONFIRMED
             ? "Waiting for receptionist queue check-in."
-            : "Check in at reception to join the live queue.",
+            : "Queue has started. Please check in at reception.",
       }
     );
   }
@@ -272,9 +295,17 @@ export const getPatientActiveQueueState = async (
     ) ?? null;
 
   if (todayAppointment) {
+    if (Boolean(todayAppointment.is_late)) {
+      return toPatientQueuePayload(todayAppointment, "late", {
+        active: true,
+        checkInState: "late",
+        message: "You are marked late. Please contact reception.",
+      });
+    }
+
     return toPatientQueuePayload(todayAppointment, "today_appointment", {
       checkInState: "not_started",
-      message: "Today's appointment is booked. Queue tracking will appear when the session starts.",
+      message: "Your appointment is scheduled. Queue has not started yet.",
     });
   }
 

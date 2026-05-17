@@ -4,6 +4,7 @@ import pool from "../config/db";
 import { env } from "../config/env";
 import { HttpError } from "../modules/pharmacy/errors";
 import type { InvoiceSummary, PaymentStatus } from "../modules/orders/types";
+import { sendInvoiceEmail } from "./email.service";
 
 type DbRecord = Record<string, any>;
 
@@ -729,6 +730,8 @@ const loadInvoiceSummary = async (client: PoolClient, orderId: number): Promise<
   return {
     id: Number(row.id),
     invoiceNo: row.invoice_no,
+    amount: normalizeMoney(row.total),
+    status: "issued",
     subtotal: normalizeMoney(row.subtotal),
     deliveryFee: normalizeMoney(row.delivery_fee),
     serviceFee: normalizeMoney(row.service_fee),
@@ -737,9 +740,27 @@ const loadInvoiceSummary = async (client: PoolClient, orderId: number): Promise<
     currency: row.currency ?? "LKR",
     pdfUrl: row.pdf_url ?? null,
     issuedAt: new Date(row.issued_at).toISOString(),
+    emailedAt: row.emailed_at ? new Date(row.emailed_at).toISOString() : null,
+    emailTo: row.email_to ?? null,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   };
+};
+
+const getOrderTrackingWebLink = (orderId: number, gatewayOrderId?: string | null) => {
+  const baseUrl = String(env.publicAppUrl || env.appWebUrl || "").trim();
+  if (!baseUrl) return null;
+  const normalizedBase = normalizeHttpsUrl(baseUrl).replace(/\/$/, "");
+  const params = new URLSearchParams({ orderId: String(orderId) });
+  if (gatewayOrderId) {
+    params.set("gatewayOrderId", gatewayOrderId);
+  }
+  return `${normalizedBase}/payment/return?${params.toString()}`;
+};
+
+const getOrderTrackingAppLink = (orderId: number) => {
+  const scheme = String(env.mobileAppScheme || "healthlink").trim().replace(/:\/*$/, "");
+  return `${scheme}://patient/orders/${orderId}`;
 };
 
 const getPostPaymentOrderStatus = async (client: PoolClient, orderId: number) => {
@@ -836,6 +857,8 @@ const createInvoiceForPaidOrderTx = async (client: PoolClient, orderId: number) 
   return {
     id: Number(insertResult.rows[0].id),
     invoiceNo: insertResult.rows[0].invoice_no,
+    amount: normalizeMoney(insertResult.rows[0].total),
+    status: "issued",
     subtotal: normalizeMoney(insertResult.rows[0].subtotal),
     deliveryFee: normalizeMoney(insertResult.rows[0].delivery_fee),
     serviceFee: normalizeMoney(insertResult.rows[0].service_fee),
@@ -844,10 +867,119 @@ const createInvoiceForPaidOrderTx = async (client: PoolClient, orderId: number) 
     currency: insertResult.rows[0].currency ?? "LKR",
     pdfUrl: insertResult.rows[0].pdf_url ?? null,
     issuedAt: new Date(insertResult.rows[0].issued_at).toISOString(),
+    emailedAt: insertResult.rows[0].emailed_at ? new Date(insertResult.rows[0].emailed_at).toISOString() : null,
+    emailTo: insertResult.rows[0].email_to ?? null,
     createdAt: new Date(insertResult.rows[0].created_at).toISOString(),
     updatedAt: new Date(insertResult.rows[0].updated_at).toISOString(),
   };
 };
+
+export const sendInvoiceEmailForOrder = async (orderId: number) =>
+  withTransaction(async (client) => {
+    const order = await getGatewayOrderRecord(client, orderId);
+    const invoice = await loadInvoiceSummary(client, orderId);
+
+    if (!invoice) {
+      throw new HttpError(404, "Invoice not found");
+    }
+
+    const paymentRow = await loadLatestPaymentRow(client, orderId);
+    const emailTo = String(order.patient_email || "").trim() || null;
+
+    if (!emailTo) {
+      console.info("[payments] INVOICE_EMAIL_FAILED", {
+        orderId,
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        reason: "missing_recipient_email",
+      });
+      return {
+        sent: false,
+        skippedReason: "missing_recipient_email",
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        emailedAt: invoice.emailedAt ?? null,
+      };
+    }
+
+    if (invoice.emailedAt) {
+      console.info("[payments] INVOICE_EMAIL_SKIPPED_ALREADY_SENT", {
+        orderId,
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        emailedAt: invoice.emailedAt,
+        emailTo: invoice.emailTo ?? emailTo,
+      });
+      return {
+        sent: false,
+        skippedReason: "already_sent",
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        emailedAt: invoice.emailedAt,
+      };
+    }
+
+    console.info("[payments] INVOICE_EMAIL_ATTEMPT", {
+      orderId,
+      invoiceId: invoice.id,
+      invoiceNo: invoice.invoiceNo,
+      emailTo,
+    });
+
+    try {
+      await sendInvoiceEmail({
+        to: emailTo,
+        patientName: order.patient_name,
+        orderId,
+        invoiceNo: invoice.invoiceNo,
+        amount: invoice.amount ?? invoice.total,
+        currency: invoice.currency || "LKR",
+        pharmacyName: order.pharmacy_name,
+        webLink: getOrderTrackingWebLink(orderId, paymentRow?.gateway_order_id ?? null),
+        appLink: getOrderTrackingAppLink(orderId),
+      });
+
+      const updateResult = await client.query(
+        `
+          UPDATE invoices
+          SET emailed_at = COALESCE(emailed_at, NOW()),
+              email_to = COALESCE($2, email_to),
+              updated_at = NOW()
+          WHERE id = $1
+          RETURNING emailed_at, email_to
+        `,
+        [invoice.id, emailTo]
+      );
+
+      const emailedAt = updateResult.rows[0]?.emailed_at
+        ? new Date(updateResult.rows[0].emailed_at).toISOString()
+        : invoice.emailedAt ?? new Date().toISOString();
+
+      console.info("[payments] INVOICE_EMAIL_SENT", {
+        orderId,
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        emailTo,
+        emailedAt,
+      });
+
+      return {
+        sent: true,
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        emailedAt,
+      };
+    } catch (error) {
+      console.error("[payments] INVOICE_EMAIL_FAILED", {
+        orderId,
+        invoiceId: invoice.id,
+        invoiceNo: invoice.invoiceNo,
+        emailTo,
+        message: error instanceof Error ? error.message : "Unknown email error",
+      });
+      throw error;
+    }
+  });
 
 export const createCheckoutSession = async (
   orderId: number,

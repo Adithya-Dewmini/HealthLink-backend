@@ -65,6 +65,8 @@ export type PaymentSummary = {
 export type InvoiceSummary = {
   id: number;
   invoiceNo: string;
+  amount?: number;
+  status?: string;
   subtotal: number;
   deliveryFee: number;
   serviceFee: number;
@@ -73,6 +75,8 @@ export type InvoiceSummary = {
   currency: string;
   pdfUrl: string | null;
   issuedAt: string;
+  emailedAt?: string | null;
+  emailTo?: string | null;
   createdAt: string;
   updatedAt: string;
 };

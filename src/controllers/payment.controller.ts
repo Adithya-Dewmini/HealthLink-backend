@@ -7,6 +7,7 @@ import {
   getOrderInvoice,
   getPublicPaymentRedirectStatus,
   getPaymentStatus,
+  sendInvoiceEmailForOrder,
   updatePaymentFromGatewayNotification,
 } from "../services/payment.service";
 import { getOrderSummaryById } from "../modules/orders/service";
@@ -353,6 +354,21 @@ export const getPayHereHostedCheckoutController = async (req: Request, res: Resp
 
 export const payHereNotifyController = async (req: Request, res: Response) => {
   try {
+    console.info({
+      source: "PAYHERE_NOTIFY_RECEIVED",
+      method: req.method,
+      contentType: req.headers?.["content-type"],
+      bodyKeys: Object.keys(req.body || {}),
+      merchant_id: req.body?.merchant_id,
+      order_id: req.body?.order_id,
+      payment_id: req.body?.payment_id,
+      payhere_amount: req.body?.payhere_amount,
+      payhere_currency: req.body?.payhere_currency,
+      status_code: req.body?.status_code,
+      md5sig_present: Boolean(req.body?.md5sig),
+      md5sig_length: req.body?.md5sig?.length || 0,
+    });
+
     const result = await updatePaymentFromGatewayNotification(req.body || {});
 
     console.info("[payments] PayHere notify controller result", {
@@ -402,6 +418,19 @@ export const payHereNotifyController = async (req: Request, res: Response) => {
         paymentStatus: result.paymentStatus || paymentStatus.paymentStatus || "pending",
         invoiceNo: paymentStatus.invoice?.invoiceNo ?? result.invoiceNo ?? null,
       });
+
+      if ((result.paymentStatus || paymentStatus.paymentStatus) === "paid") {
+        try {
+          await sendInvoiceEmailForOrder(result.orderId);
+        } catch (emailError) {
+          console.error("[payments] Invoice email dispatch failed after verified payment", {
+            orderId: result.orderId,
+            paymentId: result.paymentId,
+            invoiceNo: paymentStatus.invoice?.invoiceNo ?? result.invoiceNo ?? null,
+            message: emailError instanceof Error ? emailError.message : "Unknown email error",
+          });
+        }
+      }
     }
 
     return res.status(200).send("OK");

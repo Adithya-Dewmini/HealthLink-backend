@@ -101,6 +101,7 @@ type AppointmentSessionRow = {
   doctor_id: number;
   doctor_name: string | null;
   specialty?: string | null;
+  clinic_name?: string | null;
   queue_id?: number | null;
   queue_status?: string | null;
 };
@@ -163,6 +164,11 @@ const createStatusError = (message: string, statusCode: number, code?: string) =
   error.code = code;
   return error;
 };
+
+const getTodayDateKey = () =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TZ,
+  }).format(new Date());
 
 const mutationResponse = <T>(
   message: string,
@@ -1360,10 +1366,18 @@ export const getReceptionVisitsData = async (
       COALESCE(s.max_patients, 0)::int AS max_patients,
       u.name AS doctor_name,
       s.doctor_profile_id AS doctor_id,
-      d.specialization AS specialty
+      d.specialization AS specialty,
+      mc.name AS clinic_name,
+      q.id AS queue_id,
+      q.status AS queue_status
     FROM medical_center_doctor_schedule s
     LEFT JOIN doctors d ON d.id = s.doctor_profile_id
     LEFT JOIN users u ON u.id = d.user_id
+    LEFT JOIN medical_centers mc ON mc.id = s.medical_center_id
+    LEFT JOIN queues q
+      ON q.schedule_id = s.id
+     AND q.medical_center_id = s.medical_center_id
+     AND q.shift_date = ${APP_DATE_SQL}
     WHERE s.medical_center_id = $1
       AND s.is_active = TRUE
       AND s.date >= ${APP_DATE_SQL}
@@ -1442,11 +1456,14 @@ export const getReceptionVisitsData = async (
       doctorId: session.doctor_id,
       doctorName: session.doctor_name || "Doctor",
       specialty: session.specialty || "General Physician",
+      clinicName: session.clinic_name || "Clinic",
       date: session.date,
       startTime: String(session.start_time || "").slice(0, 5),
       endTime: String(session.end_time || "").slice(0, 5),
       slotDuration: session.slot_duration,
       maxPatients: session.max_patients,
+      queueId: session.queue_id ?? null,
+      queueStatus: session.queue_status ? normalizeQueueStatus(session.queue_status) : null,
     })),
     pagination: {
       page,
@@ -1668,11 +1685,17 @@ const requireReceptionBookingForUpdate = async (
 export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: number) => {
   const eventPayload = await withTransaction(async (client) => {
     const booking = await requireReceptionBookingForUpdate(client, medicalCenterId, bookingId);
-    if (booking.status === BOOKING_STATUS.CANCELLED || booking.status === BOOKING_STATUS.COMPLETED) {
-      throw createStatusError("This appointment cannot be checked in", 400, "INVALID_APPOINTMENT_STATUS");
+    if (String(booking.date || "").slice(0, 10) !== getTodayDateKey()) {
+      throw createStatusError("Only today's appointments can be checked in.", 400, "SESSION_NOT_TODAY");
+    }
+    if (booking.status === BOOKING_STATUS.CANCELLED) {
+      throw createStatusError("Cancelled appointments cannot be checked in.", 400, "APPOINTMENT_CANCELLED");
+    }
+    if (booking.status === BOOKING_STATUS.COMPLETED) {
+      throw createStatusError("Completed appointments cannot be checked in.", 400, "APPOINTMENT_COMPLETED");
     }
     if (booking.status === BOOKING_STATUS.MISSED) {
-      throw createStatusError("Missed appointments cannot be checked in", 400, "MISSED_APPOINTMENT");
+      throw createStatusError("Missed appointments cannot be checked in.", 400, "APPOINTMENT_MISSED");
     }
     if (booking.status === BOOKING_STATUS.CONFIRMED || booking.status === BOOKING_STATUS.IN_PROGRESS) {
       throw createStatusError("Patient is already checked in.", 409, "ALREADY_CHECKED_IN");
@@ -1894,12 +1917,17 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
 export const markReceptionVisitMissed = async (medicalCenterId: string, bookingId: number) => {
   const result = await withTransaction(async (client) => {
     const booking = await requireReceptionBookingForUpdate(client, medicalCenterId, bookingId);
-    if (
-      booking.status === BOOKING_STATUS.CANCELLED ||
-      booking.status === BOOKING_STATUS.COMPLETED ||
-      booking.status === BOOKING_STATUS.MISSED
-    ) {
-      throw createStatusError("This visit cannot be marked missed", 400);
+    if (String(booking.date || "").slice(0, 10) !== getTodayDateKey()) {
+      throw createStatusError("Only today's appointments can be marked missed.", 400, "SESSION_NOT_TODAY");
+    }
+    if (booking.status === BOOKING_STATUS.CANCELLED) {
+      throw createStatusError("Cancelled appointments cannot be marked missed.", 400, "APPOINTMENT_CANCELLED");
+    }
+    if (booking.status === BOOKING_STATUS.COMPLETED) {
+      throw createStatusError("Completed appointments cannot be marked missed.", 400, "APPOINTMENT_COMPLETED");
+    }
+    if (booking.status === BOOKING_STATUS.MISSED) {
+      throw createStatusError("This appointment is already marked missed.", 409, "APPOINTMENT_MISSED");
     }
 
     await client.query(

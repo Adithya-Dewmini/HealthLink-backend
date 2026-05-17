@@ -34,7 +34,7 @@ type CallPatientBody = {
 };
 
 type DoctorQueueRequest<TBody = Record<string, unknown>> = AuthenticatedRequest<TBody>;
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; code?: string; requiresConfirmation?: boolean };
 
 type QueueRow = {
   id: number;
@@ -62,12 +62,13 @@ const receptionRoom = "reception";
 
 const getDoctorUserId = (req: DoctorQueueRequest) => {
   if (!req.user?.id) {
-    throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401, code: "NOT_ALLOWED" });
   }
 
   if (req.user.role !== "doctor") {
     throw Object.assign(new Error("Only doctors can access this resource"), {
       statusCode: 403,
+      code: "NOT_ALLOWED",
     });
   }
 
@@ -80,6 +81,10 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
 
   return res.status(statusCode).json({
     message: appError?.message || fallbackMessage,
+    ...(typeof appError?.code === "string" && appError.code.trim() ? { code: appError.code } : {}),
+    ...(typeof appError?.requiresConfirmation === "boolean"
+      ? { requiresConfirmation: appError.requiresConfirmation }
+      : {}),
   });
 };
 
@@ -171,6 +176,7 @@ const activateQueuePatientForDoctor = async (
       new Error("Finish or skip the current patient before calling the next patient"),
       {
         statusCode: 409,
+        code: "PATIENT_NOT_CALLED",
       }
     );
   }
@@ -209,6 +215,7 @@ const activateQueuePatientForDoctor = async (
       ),
       {
         statusCode: input.queuePatientId ? 404 : 409,
+        code: input.queuePatientId ? "QUEUE_NOT_FOUND" : "PATIENT_NOT_CALLED",
       }
     );
   }
@@ -284,7 +291,7 @@ export const startQueue = async (
     const activeSchedule = await resolveStartableSchedule(doctorId, requestedScheduleId);
 
     if (!activeSchedule) {
-      return res.status(400).json({ message: "No active session found for this time" });
+      return res.status(400).json({ message: "No active session found for this time", code: "SESSION_NOT_LIVE" });
     }
 
     const activeQueuesResult = await pool.query<{ id: number }>(
@@ -373,11 +380,11 @@ export const startQueue = async (
     const existingQueue = todayQueueResult.rows[0];
     if (existingQueue) {
       if (existingQueue.status === "LIVE" || existingQueue.status === "PAUSED") {
-        return res.status(409).json({ message: "Queue already started", queue: existingQueue });
+        return res.status(409).json({ message: "Queue already started", code: "SESSION_NOT_LIVE", queue: existingQueue });
       }
 
       if (existingQueue.status === "ENDED") {
-        return res.status(409).json({ message: "Today's clinic has already ended" });
+        return res.status(409).json({ message: "Today's clinic has already ended", code: "QUEUE_ALREADY_COMPLETED" });
       }
     }
 
@@ -396,6 +403,7 @@ export const startQueue = async (
       if (appError?.code === "23505") {
         return res.json({
           message: "This session's queue has already ended",
+          code: "QUEUE_ALREADY_COMPLETED",
         });
       }
 
@@ -492,7 +500,7 @@ export const pauseQueue = async (req: DoctorQueueRequest, res: Response) => {
     const queue = await getLatestQueueForDoctorToday(doctorId);
 
     if (!queue) {
-      return res.status(404).json({ message: "No active queue found today" });
+      return res.status(404).json({ message: "No active queue found today", code: "QUEUE_NOT_FOUND" });
     }
 
     const updatedQueueResult = await pool.query<QueueRow>(
@@ -532,11 +540,11 @@ export const resumeQueue = async (req: DoctorQueueRequest, res: Response) => {
     const queue = await getLatestQueueForDoctorToday(doctorId);
 
     if (!queue) {
-      return res.status(404).json({ message: "No queue found today" });
+      return res.status(404).json({ message: "No queue found today", code: "QUEUE_NOT_FOUND" });
     }
 
     if (queue.status !== "PAUSED") {
-      return res.status(400).json({ message: "Queue is not paused" });
+      return res.status(400).json({ message: "Queue is not paused", code: "SESSION_NOT_LIVE" });
     }
 
     const updatedQueueResult = await pool.query<QueueRow>(
@@ -619,7 +627,7 @@ export const addPatientToQueue = async (
     const queue = queueResult.rows[0];
     if (!queue) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "No active LIVE queue found today" });
+      return res.status(400).json({ message: "No active LIVE queue found today", code: "SESSION_NOT_LIVE" });
     }
 
     const tokenResult = await client.query<{ next_token: number }>(
@@ -690,7 +698,7 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
     const queue = queueResult.rows[0];
     if (!queue) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "No LIVE queue found today" });
+      return res.status(400).json({ message: "No LIVE queue found today", code: "SESSION_NOT_LIVE" });
     }
 
     const waitingPatientCount = await client.query<{ id: number }>(
@@ -824,14 +832,14 @@ export const callPatient = async (
 
     if (!queuePatientId) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "queuePatientId is required" });
+      return res.status(400).json({ message: "queuePatientId is required", code: "QUEUE_NOT_FOUND" });
     }
 
     const queue = await getLiveQueueForDoctorToday(doctorId, client);
 
     if (!queue) {
       await client.query("ROLLBACK");
-      return res.status(404).json({ message: "No active LIVE queue found today" });
+      return res.status(404).json({ message: "No active LIVE queue found today", code: "SESSION_NOT_LIVE" });
     }
 
     const activation = await activateQueuePatientForDoctor(client, {
@@ -882,7 +890,7 @@ export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
 
     if (!queue) {
       await client.query("ROLLBACK");
-      return res.status(404).json({ message: "No active queue found today" });
+      return res.status(404).json({ message: "No active queue found today", code: "QUEUE_NOT_FOUND" });
     }
 
     const skippedResult = await client.query<{ id: number; patient_id: number | null }>(
@@ -899,7 +907,7 @@ export const skipPatient = async (req: DoctorQueueRequest, res: Response) => {
 
     if (skippedResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: "No active patient to skip" });
+      return res.status(400).json({ message: "No active patient to skip", code: "PATIENT_NOT_CALLED" });
     }
 
     const missedPatientId = skippedResult.rows[0]?.patient_id ?? null;
@@ -963,7 +971,7 @@ export const endQueue = async (req: DoctorQueueRequest<EndQueueBody>, res: Respo
 
     if (!queue) {
       await client.query("ROLLBACK");
-      return res.status(404).json({ message: "No active queue found today" });
+      return res.status(404).json({ message: "No active queue found today", code: "QUEUE_NOT_FOUND" });
     }
 
     const activePatientResult = await client.query<{ id: number }>(
@@ -982,6 +990,7 @@ export const endQueue = async (req: DoctorQueueRequest<EndQueueBody>, res: Respo
       await client.query("ROLLBACK");
       return res.status(409).json({
         message: "Finish or skip the current patient before ending the clinic.",
+        code: "PATIENT_NOT_CALLED",
       });
     }
 
@@ -1002,6 +1011,7 @@ export const endQueue = async (req: DoctorQueueRequest<EndQueueBody>, res: Respo
       return res.status(409).json({
         message: "There are waiting patients. End clinic anyway?",
         requiresConfirmation: true,
+        code: "SESSION_NOT_LIVE",
       });
     }
 

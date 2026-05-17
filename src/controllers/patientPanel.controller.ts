@@ -2,7 +2,7 @@ import type { Response } from "express";
 import type { AuthenticatedRequest } from "../types/auth";
 import { getPatientActiveQueueState } from "../services/patientBooking.service";
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; code?: string };
 
 const requirePatientUser = (req: AuthenticatedRequest) => {
   const role = req.user?.role;
@@ -30,6 +30,7 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
   const appError = error as HttpError;
   return res.status(Number(appError?.statusCode) || 500).json({
     success: false,
+    code: appError?.code || null,
     message: appError?.message || fallbackMessage,
   });
 };

@@ -28,9 +28,10 @@ type Queryable = {
   query: <TRow = any>(text: string, params?: unknown[]) => Promise<{ rows: TRow[] }>;
 };
 
-const createStatusError = (message: string, statusCode: number) => {
-  const error = new Error(message) as Error & { statusCode?: number };
+const createStatusError = (message: string, statusCode: number, code?: string) => {
+  const error = new Error(message) as Error & { statusCode?: number; code?: string };
   error.statusCode = statusCode;
+  error.code = code;
   return error;
 };
 
@@ -45,7 +46,7 @@ export const requireDoctorIdForUser = async (userId: number, db: Queryable = poo
   const doctorId = result.rows[0]?.id ?? null;
 
   if (!doctorId) {
-    throw createStatusError("Doctor profile not found", 404);
+    throw createStatusError("Doctor profile not found", 404, "DOCTOR_NOT_ASSIGNED");
   }
 
   return doctorId;

@@ -11,6 +11,14 @@ vi.mock("../src/config/db", () => ({
   },
 }));
 
+const { sendInvoiceEmailMock } = vi.hoisted(() => ({
+  sendInvoiceEmailMock: vi.fn(),
+}));
+
+vi.mock("../src/services/email.service", () => ({
+  sendInvoiceEmail: sendInvoiceEmailMock,
+}));
+
 vi.mock("../src/config/env", () => ({
   env: {
     appTz: "Asia/Colombo",
@@ -32,6 +40,7 @@ import {
   createCheckoutSession,
   generatePayHereHash,
   getOrderInvoice,
+  sendInvoiceEmailForOrder,
   updatePaymentFromGatewayNotification,
 } from "../src/services/payment.service";
 
@@ -110,6 +119,7 @@ const orderRow = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sendInvoiceEmailMock.mockResolvedValue(undefined);
   env.payHereMerchantId = "1211147";
   env.payHereMerchantSecret = "sandbox-secret";
   env.payHereBaseUrl = "https://sandbox.payhere.lk/pay/checkout";
@@ -619,6 +629,166 @@ describe("payment service", () => {
 
     await expect(getOrderInvoice(88, { userId: 999, role: "patient" })).rejects.toThrow(
       "You do not have access to this invoice"
+    );
+  });
+
+  it("sends an invoice email once and records emailed_at", async () => {
+    const client = createMockClient((sql, params) => {
+      if (
+        sql.includes("FROM orders o") &&
+        sql.includes("LEFT JOIN patient_profiles pp") &&
+        sql.includes("WHERE o.id = $1") &&
+        sql.includes("FOR UPDATE OF o")
+      ) {
+        return { rows: [orderRow] };
+      }
+
+      if (sql.includes("SELECT * FROM invoices") && sql.includes("WHERE order_id = $1")) {
+        return {
+          rows: [
+            {
+              id: 91,
+              invoice_no: "HL-INV-20260516-000001",
+              subtotal: 2500,
+              delivery_fee: 0,
+              service_fee: 0,
+              discount: 0,
+              total: 2500,
+              currency: "LKR",
+              pdf_url: null,
+              issued_at: "2026-05-16T04:10:00.000Z",
+              emailed_at: null,
+              email_to: null,
+              created_at: "2026-05-16T04:10:00.000Z",
+              updated_at: "2026-05-16T04:10:00.000Z",
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("SELECT * FROM payments") && sql.includes("WHERE order_id = $1")) {
+        return {
+          rows: [
+            {
+              id: 501,
+              gateway: "payhere",
+              gateway_order_id: "88",
+              gateway_payment_id: "PH-12345",
+              amount: 2500,
+              currency: "LKR",
+              status: "paid",
+              method: "VISA",
+              verified_at: "2026-05-16T04:10:00.000Z",
+              created_at: "2026-05-16T04:00:00.000Z",
+              updated_at: "2026-05-16T04:10:00.000Z",
+            },
+          ],
+        };
+      }
+
+      if (sql.startsWith("UPDATE invoices SET emailed_at = COALESCE(emailed_at, NOW())")) {
+        expect(params[0]).toBe(91);
+        expect(params[1]).toBe("patient@example.com");
+        return {
+          rows: [
+            {
+              emailed_at: "2026-05-16T04:15:00.000Z",
+              email_to: "patient@example.com",
+            },
+          ],
+        };
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    connectMock.mockResolvedValue(client);
+
+    const result = await sendInvoiceEmailForOrder(88);
+
+    expect(sendInvoiceEmailMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "patient@example.com",
+        orderId: 88,
+        invoiceNo: "HL-INV-20260516-000001",
+      })
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        sent: true,
+        invoiceId: 91,
+        invoiceNo: "HL-INV-20260516-000001",
+      })
+    );
+  });
+
+  it("skips duplicate invoice email sends when emailed_at already exists", async () => {
+    const client = createMockClient((sql) => {
+      if (
+        sql.includes("FROM orders o") &&
+        sql.includes("LEFT JOIN patient_profiles pp") &&
+        sql.includes("WHERE o.id = $1") &&
+        sql.includes("FOR UPDATE OF o")
+      ) {
+        return { rows: [orderRow] };
+      }
+
+      if (sql.includes("SELECT * FROM invoices") && sql.includes("WHERE order_id = $1")) {
+        return {
+          rows: [
+            {
+              id: 91,
+              invoice_no: "HL-INV-20260516-000001",
+              subtotal: 2500,
+              delivery_fee: 0,
+              service_fee: 0,
+              discount: 0,
+              total: 2500,
+              currency: "LKR",
+              pdf_url: null,
+              issued_at: "2026-05-16T04:10:00.000Z",
+              emailed_at: "2026-05-16T04:12:00.000Z",
+              email_to: "patient@example.com",
+              created_at: "2026-05-16T04:10:00.000Z",
+              updated_at: "2026-05-16T04:12:00.000Z",
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("SELECT * FROM payments") && sql.includes("WHERE order_id = $1")) {
+        return {
+          rows: [
+            {
+              id: 501,
+              gateway: "payhere",
+              gateway_order_id: "88",
+              gateway_payment_id: "PH-12345",
+              amount: 2500,
+              currency: "LKR",
+              status: "paid",
+              method: "VISA",
+              verified_at: "2026-05-16T04:10:00.000Z",
+              created_at: "2026-05-16T04:00:00.000Z",
+              updated_at: "2026-05-16T04:10:00.000Z",
+            },
+          ],
+        };
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    connectMock.mockResolvedValue(client);
+
+    const result = await sendInvoiceEmailForOrder(88);
+
+    expect(sendInvoiceEmailMock).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        sent: false,
+        skippedReason: "already_sent",
+      })
     );
   });
 });

@@ -33,6 +33,7 @@ export const syncAndFetchPatientBookings = async (patientId: number) => {
            queue_patient.queue_token_number,
            queue_patient.queue_checked_in_at,
            queue_patient.queue_missed_at,
+           queue_patient.consultation_status,
            queue_progress.current_serving_token,
            queue_progress.waiting_count,
            COALESCE(b.grace_period_minutes, $2) AS grace_period_minutes,
@@ -71,8 +72,10 @@ export const syncAndFetchPatientBookings = async (patientId: number) => {
         qp.status AS queue_patient_status,
         qp.token_number AS queue_token_number,
         qp.checked_in_at::text AS queue_checked_in_at,
-        qp.missed_at::text AS queue_missed_at
+        qp.missed_at::text AS queue_missed_at,
+        c.status AS consultation_status
       FROM queue_patients qp
+      LEFT JOIN consultations c ON c.id = qp.consultation_id
       WHERE qp.queue_id = live_queue.queue_id
         AND qp.patient_id = b.patient_id
       ORDER BY qp.id DESC

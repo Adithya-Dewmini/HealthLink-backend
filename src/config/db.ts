@@ -2387,6 +2387,8 @@ const initDbOnce = async () => {
         currency TEXT NOT NULL DEFAULT 'LKR',
         pdf_url TEXT,
         issued_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        emailed_at TIMESTAMP,
+        email_to TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       )
@@ -2409,6 +2411,8 @@ const initDbOnce = async () => {
           ALTER TABLE invoices ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'LKR';
           ALTER TABLE invoices ADD COLUMN IF NOT EXISTS pdf_url TEXT;
           ALTER TABLE invoices ADD COLUMN IF NOT EXISTS issued_at TIMESTAMP NOT NULL DEFAULT NOW();
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS emailed_at TIMESTAMP;
+          ALTER TABLE invoices ADD COLUMN IF NOT EXISTS email_to TEXT;
           ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
           ALTER TABLE invoices ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW();
         END IF;
