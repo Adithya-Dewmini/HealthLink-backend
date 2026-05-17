@@ -1,7 +1,6 @@
 import pool from "../../config/db";
 import {
   BOOKING_NOW_SQL,
-  BOOKING_SCHEDULED_AT_SQL,
   DEFAULT_BOOKING_GRACE_PERIOD_MINUTES,
   markMissedBookings,
   normalizeBookingStatus,
@@ -9,6 +8,7 @@ import {
 
 export const syncAndFetchPatientBookings = async (patientId: number) => {
   await markMissedBookings(pool, { patientId });
+  const bookingScheduledAtSql = "COALESCE(b.scheduled_at, ((b.date::timestamp) + b.time))";
 
   const result = await pool.query(
     `
@@ -37,8 +37,8 @@ export const syncAndFetchPatientBookings = async (patientId: number) => {
            queue_progress.waiting_count,
            COALESCE(b.grace_period_minutes, $2) AS grace_period_minutes,
            (
-             ${BOOKING_NOW_SQL} > ${BOOKING_SCHEDULED_AT_SQL}
-             AND ${BOOKING_NOW_SQL} <= ${BOOKING_SCHEDULED_AT_SQL}
+             ${BOOKING_NOW_SQL} > ${bookingScheduledAtSql}
+             AND ${BOOKING_NOW_SQL} <= ${bookingScheduledAtSql}
                + make_interval(mins => COALESCE(b.grace_period_minutes, $2))
            ) AS is_late,
            u.name AS doctor_name,

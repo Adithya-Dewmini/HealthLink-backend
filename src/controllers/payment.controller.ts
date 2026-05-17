@@ -31,6 +31,13 @@ const parseOrderId = (value: unknown, label = "order id") => {
   return parsed;
 };
 
+const getQueryValue = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+  return value ?? "";
+};
+
 const requireAuthenticatedUser = (req: AuthenticatedRequest) => {
   const userId = Number(req.user?.id ?? 0);
   const role = String(req.user?.role || "").toLowerCase();
@@ -209,9 +216,69 @@ export const getPharmacyOrderPaymentStatusController = async (
 export const getPayHereRedirectStatusController = async (req: Request, res: Response) => {
   try {
     const orderId = parseOrderId(req.params.orderId);
-    const gatewayOrderId = String(req.query.gatewayOrderId || req.query.order_id || "").trim() || null;
-    const paymentIdRaw = String(req.query.paymentId || req.query.payment_id || "").trim();
+    const gatewayOrderId = String(getQueryValue(req.query.gatewayOrderId) || getQueryValue(req.query.order_id) || "").trim() || null;
+    const paymentIdRaw = String(getQueryValue(req.query.paymentId) || getQueryValue(req.query.payment_id) || "").trim();
     const paymentId = paymentIdRaw ? parseOrderId(paymentIdRaw, "payment id") : null;
+    const redirectPayload = Object.fromEntries(
+      Object.entries(req.query).map(([key, value]) => [key, getQueryValue(value)])
+    ) as Record<string, unknown>;
+
+    console.info("[payments] Redirect status request query", {
+      orderId,
+      gatewayOrderId,
+      paymentId,
+      keys: Object.keys(redirectPayload).sort(),
+      merchant_id: redirectPayload.merchant_id ?? null,
+      order_id: redirectPayload.order_id ?? null,
+      payment_id: redirectPayload.payment_id ?? redirectPayload.paymentId ?? null,
+      status_code: redirectPayload.status_code ?? null,
+      payhere_amount: redirectPayload.payhere_amount ?? null,
+      payhere_currency: redirectPayload.payhere_currency ?? null,
+      md5sig_present: Boolean(String(redirectPayload.md5sig ?? "").trim()),
+      md5sig_length: String(redirectPayload.md5sig ?? "").trim().length || 0,
+      custom_1: redirectPayload.custom_1 ?? null,
+      custom_2: redirectPayload.custom_2 ?? null,
+    });
+
+    if (!redirectPayload.order_id && gatewayOrderId) {
+      redirectPayload.order_id = gatewayOrderId;
+    }
+
+    const hasSignedReturnPayload = [
+      "merchant_id",
+      "order_id",
+      "status_code",
+      "md5sig",
+      "payhere_amount",
+      "payhere_currency",
+    ].every((key) => String(redirectPayload[key] ?? "").trim());
+
+    if (hasSignedReturnPayload) {
+      console.info("[payments] Redirect status sync attempt", {
+        orderId,
+        gatewayOrderId,
+        paymentId,
+        status_code: redirectPayload.status_code ?? null,
+        payment_id: redirectPayload.payment_id ?? null,
+      });
+
+      const syncResult = await updatePaymentFromGatewayNotification(redirectPayload);
+      console.info("[payments] Redirect status sync result", {
+        processed: syncResult.processed,
+        ignoredReason: syncResult.ignoredReason ?? null,
+        orderId: syncResult.orderId ?? orderId,
+        paymentId: syncResult.paymentId ?? paymentId,
+        paymentStatus: syncResult.paymentStatus ?? null,
+        invoiceNo: syncResult.invoiceNo ?? null,
+      });
+    } else {
+      console.info("[payments] Redirect status lookup without signed gateway payload", {
+        orderId,
+        gatewayOrderId,
+        paymentId,
+        queryKeys: Object.keys(redirectPayload),
+      });
+    }
 
     const status = await getPublicPaymentRedirectStatus({
       orderId,
