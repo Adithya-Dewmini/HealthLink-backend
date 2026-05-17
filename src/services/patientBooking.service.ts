@@ -105,6 +105,9 @@ const isQueuePatientActive = (status?: string | null) =>
 const isQueueLive = (status?: string | null) =>
   ["LIVE", "PAUSED"].includes(String(status || "").trim().toUpperCase());
 
+const isQueueEnded = (status?: string | null) =>
+  String(status || "").trim().toUpperCase() === "ENDED";
+
 const isConsultationActive = (status?: string | null) =>
   ["ACTIVE", "IN_PROGRESS"].includes(String(status || "").trim().toUpperCase());
 
@@ -253,6 +256,22 @@ export const getPatientActiveQueueState = async (
     return toPatientQueuePayload(missedQueueBooking, "missed", {
       checkInState: "missed",
       message: "This appointment was marked missed.",
+    });
+  }
+
+  const endedQueueBooking =
+    scopedBookings.find(
+      (booking) =>
+        isTodayDate(booking.date) &&
+        isQueueEnded(booking.queue_status) &&
+        !isClosedBookingStatus(booking.status)
+    ) ?? null;
+
+  if (endedQueueBooking) {
+    return toPatientQueuePayload(endedQueueBooking, "missed", {
+      active: false,
+      checkInState: "missed",
+      message: "Today's clinic queue has ended.",
     });
   }
 

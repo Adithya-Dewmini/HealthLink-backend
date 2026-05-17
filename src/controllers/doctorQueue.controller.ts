@@ -1038,6 +1038,21 @@ export const endQueue = async (req: DoctorQueueRequest<EndQueueBody>, res: Respo
       }
     }
 
+    const unattendedBookings = queue.schedule_id
+      ? await client.query<{ patient_id: number | null }>(
+          `
+          UPDATE bookings
+          SET status = '${BOOKING_STATUS.MISSED}',
+              missed_at = COALESCE(missed_at, NOW())
+          WHERE session_id = $1
+            AND date = ${APP_DATE_SQL}
+            AND COALESCE(UPPER(status), '${BOOKING_STATUS.BOOKED}') IN ('${BOOKING_STATUS.BOOKED}', '${BOOKING_STATUS.CONFIRMED}')
+          RETURNING patient_id
+          `,
+          [queue.schedule_id]
+        )
+      : { rows: [] as Array<{ patient_id: number | null }> };
+
     const endedQueueResult = await client.query<QueueRow>(
       `
       UPDATE queues
@@ -1072,6 +1087,18 @@ export const endQueue = async (req: DoctorQueueRequest<EndQueueBody>, res: Respo
           sessionId: queue.schedule_id,
         });
       });
+
+      for (const row of unattendedBookings.rows) {
+        if (!row.patient_id) continue;
+        broadcastQueueUpdate(doctorId, {
+          queueId: queue.id,
+          type: "CLINIC_ENDED",
+          triggeredBy: req.user?.role,
+          patientId: row.patient_id,
+          medicalCenterId: queue.medical_center_id,
+          sessionId: queue.schedule_id,
+        });
+      }
     } catch (error) {
       console.error("Clinic ended room broadcast error:", error);
     }

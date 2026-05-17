@@ -2950,13 +2950,40 @@ export const endReceptionQueue = async (input: {
   const result = await withTransaction(async (client) => {
     const queue = await requireLiveQueueForUpdate(client, input);
 
+    const activeConsultationPatients = await client.query<{ patient_id: number | null }>(
+      `
+      SELECT qp.patient_id
+      FROM queue_patients qp
+      LEFT JOIN consultations c ON c.id = qp.consultation_id
+      WHERE qp.queue_id = $1
+        AND qp.status = 'WITH_DOCTOR'
+        AND COALESCE(UPPER(c.status), '') IN ('ACTIVE', 'IN_PROGRESS')
+      FOR UPDATE
+      `,
+      [queue.id]
+    );
+
+    if (activeConsultationPatients.rows.length > 0) {
+      throw createStatusError(
+        "Complete the active consultation before ending the queue.",
+        409,
+        "ACTIVE_CONSULTATION_EXISTS"
+      );
+    }
+
     const completedPatients = await client.query<{ patient_id: number | null }>(
       `
-      UPDATE queue_patients
+      UPDATE queue_patients qp
       SET status = 'COMPLETED',
-          completed_at = COALESCE(completed_at, NOW())
-      WHERE queue_id = $1
-        AND status = 'WITH_DOCTOR'
+          completed_at = COALESCE(qp.completed_at, NOW())
+      WHERE qp.queue_id = $1
+        AND qp.status = 'WITH_DOCTOR'
+        AND EXISTS (
+          SELECT 1
+          FROM consultations c
+          WHERE c.id = qp.consultation_id
+            AND COALESCE(UPPER(c.status), '') = 'COMPLETED'
+        )
       RETURNING patient_id
       `,
       [queue.id]
@@ -2968,8 +2995,47 @@ export const endReceptionQueue = async (input: {
         doctorId: Number(queue.doctor_id),
         patientId: Number(row.patient_id),
         nextStatus: BOOKING_STATUS.COMPLETED,
-        allowedCurrentStatuses: [BOOKING_STATUS.IN_PROGRESS],
+        allowedCurrentStatuses: [
+          BOOKING_STATUS.IN_PROGRESS,
+          BOOKING_STATUS.CONFIRMED,
+          BOOKING_STATUS.BOOKED,
+        ],
         setEndedAt: true,
+      });
+    }
+
+    const calledPatients = await client.query<{ patient_id: number | null }>(
+      `
+      UPDATE queue_patients qp
+      SET status = 'MISSED',
+          missed_at = COALESCE(qp.missed_at, NOW())
+      WHERE qp.queue_id = $1
+        AND qp.status = 'WITH_DOCTOR'
+        AND (
+          qp.consultation_id IS NULL
+          OR NOT EXISTS (
+            SELECT 1
+            FROM consultations c
+            WHERE c.id = qp.consultation_id
+              AND COALESCE(UPPER(c.status), '') IN ('ACTIVE', 'IN_PROGRESS', 'COMPLETED')
+          )
+        )
+      RETURNING patient_id
+      `,
+      [queue.id]
+    );
+
+    for (const row of calledPatients.rows) {
+      if (!row.patient_id) continue;
+      await updateNearestBookingStatus(client, {
+        doctorId: Number(queue.doctor_id),
+        patientId: Number(row.patient_id),
+        nextStatus: BOOKING_STATUS.MISSED,
+        allowedCurrentStatuses: [
+          BOOKING_STATUS.IN_PROGRESS,
+          BOOKING_STATUS.CONFIRMED,
+          BOOKING_STATUS.BOOKED,
+        ],
       });
     }
 
@@ -2995,6 +3061,22 @@ export const endReceptionQueue = async (input: {
       });
     }
 
+    const unattendedBookings = queue.schedule_id
+      ? await client.query<{ patient_id: number | null }>(
+          `
+          UPDATE bookings
+          SET status = '${BOOKING_STATUS.MISSED}',
+              missed_at = COALESCE(missed_at, NOW())
+          WHERE medical_center_id = $1
+            AND session_id = $2
+            AND date = ${APP_DATE_SQL}
+            AND COALESCE(UPPER(status), '${BOOKING_STATUS.BOOKED}') IN ('${BOOKING_STATUS.BOOKED}', '${BOOKING_STATUS.CONFIRMED}')
+          RETURNING patient_id
+          `,
+          [input.medicalCenterId, queue.schedule_id]
+        )
+      : { rows: [] as Array<{ patient_id: number | null }> };
+
     await client.query(
       `
       UPDATE queues
@@ -3009,15 +3091,52 @@ export const endReceptionQueue = async (input: {
       queueId: queue.id,
       sessionId: queue.schedule_id,
       doctorId: queue.doctor_id,
+      completedPatients: completedPatients.rows,
       completedCount: completedPatients.rows.length,
+      calledMissedPatients: calledPatients.rows,
       missedPatients: missedPatients.rows,
-      missedCount: missedPatients.rows.length,
+      unattendedBookings: unattendedBookings.rows,
+      missedCount: calledPatients.rows.length + missedPatients.rows.length + unattendedBookings.rows.length,
       status: "ended",
     });
   });
 
+  for (const row of result.data.calledMissedPatients) {
+    emitPatientMissed({
+      queueId: result.data.queueId,
+      sessionId: result.data.sessionId,
+      doctorId: result.data.doctorId,
+      patientId: row.patient_id,
+      medicalCenterId: input.medicalCenterId,
+    });
+  }
+
+  for (const row of result.data.completedPatients) {
+    if (!row.patient_id) continue;
+    emitQueueUpdate({
+      type: "QUEUE_ENDED",
+      queueId: result.data.queueId,
+      sessionId: result.data.sessionId,
+      doctorId: result.data.doctorId,
+      patientId: row.patient_id,
+      medicalCenterId: input.medicalCenterId,
+    });
+  }
+
   for (const row of result.data.missedPatients) {
     emitPatientMissed({
+      queueId: result.data.queueId,
+      sessionId: result.data.sessionId,
+      doctorId: result.data.doctorId,
+      patientId: row.patient_id,
+      medicalCenterId: input.medicalCenterId,
+    });
+  }
+
+  for (const row of result.data.unattendedBookings) {
+    if (!row.patient_id) continue;
+    emitQueueUpdate({
+      type: "QUEUE_ENDED",
       queueId: result.data.queueId,
       sessionId: result.data.sessionId,
       doctorId: result.data.doctorId,

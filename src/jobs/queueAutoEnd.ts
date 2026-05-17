@@ -70,26 +70,23 @@ export const startQueueAutoEnd = (io: Server) => {
         const doctorId = queue.doctor_id;
         const medicalCenterId = queue.medical_center_id ?? null;
 
-        const completedPatients = await pool.query(
+        const activeQueuePatients = await pool.query<{ patient_id: number | null }>(
           `
-          UPDATE queue_patients
-          SET status = 'COMPLETED',
-              completed_at = NOW()
+          SELECT patient_id
+          FROM queue_patients
           WHERE queue_id = $1
             AND status = 'WITH_DOCTOR'
-          RETURNING patient_id
           `,
           [queueId]
         );
 
-        for (const row of completedPatients.rows) {
-          await updateNearestBookingStatus(pool, {
-            doctorId: Number(doctorId),
-            patientId: Number(row.patient_id),
-            nextStatus: BOOKING_STATUS.COMPLETED,
-            allowedCurrentStatuses: [BOOKING_STATUS.IN_PROGRESS],
-            setEndedAt: true,
+        if (activeQueuePatients.rows.length > 0) {
+          console.warn("[queueAutoEnd] skipped queue end because an active patient is still in the queue", {
+            queueId,
+            doctorId,
+            activePatientCount: activeQueuePatients.rows.length,
           });
+          continue;
         }
 
         const missedPatients = await pool.query(
@@ -112,6 +109,23 @@ export const startQueueAutoEnd = (io: Server) => {
             allowedCurrentStatuses: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
           });
         }
+
+        await pool.query(
+          `
+          UPDATE bookings
+          SET status = '${BOOKING_STATUS.MISSED}',
+              missed_at = COALESCE(missed_at, NOW())
+          WHERE session_id = (
+              SELECT schedule_id
+              FROM queues
+              WHERE id = $1
+              LIMIT 1
+            )
+            AND date = ${APP_DATE_SQL}
+            AND COALESCE(UPPER(status), '${BOOKING_STATUS.BOOKED}') IN ('${BOOKING_STATUS.BOOKED}', '${BOOKING_STATUS.CONFIRMED}')
+          `,
+          [queueId]
+        );
 
         await pool.query(
           `
