@@ -15,7 +15,7 @@ type QueueJoinBody = {
   medical_center_id?: string;
 };
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; code?: string };
 
 const requirePatientLikeUser = (req: AuthenticatedRequest) => {
   const role = req.user?.role;
@@ -49,6 +49,7 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
 
   return res.status(statusCode).json({
     message: appError?.message || fallbackMessage,
+    code: appError?.code || undefined,
   });
 };
 

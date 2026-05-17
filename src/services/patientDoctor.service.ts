@@ -12,11 +12,14 @@ const APP_TZ = env.appTz;
 const APP_TIME_SQL = `(now() AT TIME ZONE '${APP_TZ}')::time`;
 const APP_DATE_SQL = `(now() AT TIME ZONE '${APP_TZ}')::date`;
 
-type HttpError = Error & { statusCode?: number };
+type HttpError = Error & { statusCode?: number; code?: string };
 
-const createStatusError = (message: string, statusCode: number) => {
+const createStatusError = (message: string, statusCode: number, code?: string) => {
   const error = new Error(message) as HttpError;
   error.statusCode = statusCode;
+  if (code) {
+    error.code = code;
+  }
   return error;
 };
 
@@ -954,18 +957,33 @@ export const joinDoctorQueueForPatient = async (
       throw createStatusError("Queue is not live", 400);
     }
 
-    const existing = await client.query(
+    const existing = await client.query<{
+      id: number;
+      token_number: number | null;
+      status: string | null;
+    }>(
       `
-      SELECT 1 FROM queue_patients
+      SELECT id, token_number, status
+      FROM queue_patients
       WHERE queue_id = $1
         AND patient_id = $2
-        AND status IN ('WAITING', 'WITH_DOCTOR')
+      ORDER BY id DESC
       LIMIT 1
       `,
       [queue.id, patientId]
     );
-    if (existing.rows.length > 0) {
-      throw createStatusError("Already in queue", 409);
+
+    const existingRow = existing.rows[0] ?? null;
+    if (existingRow && ["WAITING", "WITH_DOCTOR"].includes(String(existingRow.status || "").toUpperCase())) {
+      await client.query("COMMIT");
+      return {
+        message: "Already in queue",
+        code: "ALREADY_IN_QUEUE",
+        queueId: queue.id,
+        sessionId: queue.schedule_id ?? null,
+        tokenNumber: existingRow.token_number ?? null,
+        alreadyJoined: true,
+      };
     }
 
     const nextTokenResult = await client.query(
@@ -1024,7 +1042,9 @@ export const joinDoctorQueueForPatient = async (
 
     return {
       message: "Joined queue",
+      code: "JOINED_QUEUE",
       queueId: queue.id,
+      sessionId: queue.schedule_id ?? null,
       tokenNumber: insertResult.rows[0]?.token_number ?? nextToken,
     };
   } catch (error) {
