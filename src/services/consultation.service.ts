@@ -6,8 +6,12 @@ import { io } from "../server";
 import QRCode from "qrcode";
 import { filterExpoTokens, sendExpoPush } from "../utils/expoPush";
 import { BOOKING_STATUS, updateNearestBookingStatus } from "../utils/bookingLifecycle";
-import { SOCKET_EVENTS, logRealtimeEmit } from "./realtime.service";
-import { createPrescriptionQrToken } from "./prescription.service";
+import {
+  SOCKET_EVENTS,
+  emitPrescriptionUpdated,
+  logRealtimeEmit,
+} from "./realtime.service";
+import { createPrescriptionQrToken, ensurePrescriptionQrToken } from "./prescription.service";
 
 const doctorRoom = (doctorId: number | string) => `doctor-${doctorId}`;
 const receptionRoom = "reception";
@@ -22,6 +26,26 @@ const createStatusError = (message: string, statusCode: number) => {
   error.statusCode = statusCode;
   return error;
 };
+
+const normalizeMedicineList = (value: unknown): any[] => {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+};
+
+const buildPrescriptionDeepLink = (qrToken: string | null) =>
+  qrToken ? `https://healthlink.app/prescription/${qrToken}` : null;
 
 export const normalizeMedName = (value: string) => value.trim().toLowerCase();
 
@@ -171,12 +195,22 @@ const ensureQueuePatientContext = async (
 };
 
 export const getDoctorConsultationContext = async (queueId: number, doctorUserId: number) => {
-  await ensureQueuePatientContext(pool, { queueId, doctorUserId });
+  const queuePatientContext = await ensureQueuePatientContext(pool, { queueId, doctorUserId });
 
   const currentPatientResult = await pool.query(
     `
     SELECT
       qp.patient_id,
+      qp.id AS queue_patient_id,
+      qp.token_number,
+      qp.status AS queue_patient_status,
+      qp.checked_in_at,
+      qp.started_at,
+      qp.complaint,
+      qp.is_walkin,
+      q.status AS queue_status,
+      q.schedule_id,
+      q.shift_date::text AS session_date,
       u.name,
       u.profile_image,
       CASE
@@ -186,10 +220,36 @@ export const getDoctorConsultationContext = async (queueId: number, doctorUserId
       pp.gender,
       pp.blood_group,
       pp.conditions,
-      pp.allergies
+      pp.allergies,
+      mc.name AS medical_center_name,
+      s.start_time::text AS session_start,
+      s.end_time::text AS session_end,
+      b.id AS appointment_id,
+      b.status AS appointment_status,
+      b.time::text AS appointment_time,
+      c.id AS consultation_id,
+      c.status AS consultation_status,
+      c.symptoms AS consultation_symptoms,
+      c.diagnosis AS consultation_diagnosis,
+      c.notes AS consultation_notes,
+      c.medicines AS consultation_medicines,
+      p.id AS prescription_id,
+      p.issued_at::text AS prescription_issued_at,
+      p.dispensed_at::text AS prescription_dispensed_at
     FROM queue_patients qp
+    JOIN queues q ON q.id = qp.queue_id
     JOIN users u ON qp.patient_id = u.id
     LEFT JOIN patient_profiles pp ON pp.user_id = u.id
+    LEFT JOIN medical_center_doctor_schedule s ON s.id = q.schedule_id
+    LEFT JOIN medical_centers mc
+      ON mc.id = COALESCE(q.medical_center_id, qp.medical_center_id, s.medical_center_id)
+    LEFT JOIN bookings b
+      ON b.patient_id = qp.patient_id
+     AND b.session_id = q.schedule_id
+     AND b.date = q.shift_date
+     AND b.doctor_id = q.doctor_id
+    LEFT JOIN consultations c ON c.id = qp.consultation_id
+    LEFT JOIN prescriptions p ON p.consultation_id = c.id
     WHERE qp.queue_id = $1 AND qp.status = 'WITH_DOCTOR'
     LIMIT 1
     `,
@@ -238,6 +298,7 @@ export const getDoctorConsultationContext = async (queueId: number, doctorUserId
   return {
     patient: {
       id: patientRow.patient_id,
+      queuePatientId: patientRow.queue_patient_id,
       name: patientRow.name,
       age: patientRow.age,
       gender: patientRow.gender,
@@ -252,6 +313,41 @@ export const getDoctorConsultationContext = async (queueId: number, doctorUserId
       notes: visit.notes,
     })),
     medications: medicationsResult.rows.map((row: any) => row.medicine_name),
+    queue: {
+      queueId,
+      queuePatientId: patientRow.queue_patient_id,
+      tokenNumber: patientRow.token_number ?? null,
+      patientStatus: patientRow.queue_patient_status ?? null,
+      queueStatus: patientRow.queue_status ?? null,
+      checkedInAt: patientRow.checked_in_at ?? null,
+      startedAt: patientRow.started_at ?? null,
+      complaint: patientRow.complaint ?? null,
+      isWalkIn: Boolean(patientRow.is_walkin),
+    },
+    appointment: {
+      id: patientRow.appointment_id ?? null,
+      time: patientRow.appointment_time ?? null,
+      status: patientRow.appointment_status ?? null,
+    },
+    session: {
+      id: patientRow.schedule_id ?? null,
+      date: patientRow.session_date ?? null,
+      startTime: patientRow.session_start ?? null,
+      endTime: patientRow.session_end ?? null,
+      medicalCenterName: patientRow.medical_center_name ?? null,
+    },
+    consultation: {
+      id: patientRow.consultation_id ?? queuePatientContext.consultation_id ?? null,
+      status: patientRow.consultation_status ?? "draft",
+      symptoms: patientRow.consultation_symptoms ?? null,
+      diagnosis: patientRow.consultation_diagnosis ?? null,
+      notes: patientRow.consultation_notes ?? null,
+      medicines: normalizeMedicineList(patientRow.consultation_medicines),
+      prescriptionId: patientRow.prescription_id ?? null,
+      prescriptionIssuedAt: patientRow.prescription_issued_at ?? null,
+      prescriptionDispensedAt: patientRow.prescription_dispensed_at ?? null,
+      prescriptionIssued: Boolean(patientRow.prescription_id),
+    },
   };
 };
 
@@ -516,7 +612,108 @@ const insertPrescriptionItems = async (client: PoolClient, prescriptionId: numbe
   }
 };
 
-export const completeConsultationRecord = async (consultationId: string, userId: number, medicines?: any[]) => {
+const syncPrescriptionItems = async (
+  client: PoolClient,
+  prescriptionId: number,
+  medicines: any[]
+) => {
+  await client.query(`DELETE FROM prescription_items WHERE prescription_id = $1`, [prescriptionId]);
+
+  if (Array.isArray(medicines) && medicines.length > 0) {
+    await insertPrescriptionItems(client, prescriptionId, medicines);
+  }
+};
+
+const ensurePrescriptionForConsultation = async (options: {
+  client: PoolClient;
+  consultation: any;
+  medicines: any[];
+  userId: number;
+}) => {
+  const { client, consultation, medicines, userId } = options;
+  const existingPrescription = await client.query<{
+    id: number;
+    qr_code: string | null;
+    dispensed_at: string | null;
+  }>(
+    `
+    SELECT id, qr_code, dispensed_at
+    FROM prescriptions
+    WHERE consultation_id = $1
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [consultation.id]
+  );
+
+  let prescriptionId = existingPrescription.rows[0]?.id ?? null;
+
+  if (!prescriptionId) {
+    const prescriptionResult = await client.query<{ id: number }>(
+      `
+      INSERT INTO prescriptions (consultation_id, qr_code, medical_center_id, status)
+      VALUES ($1, $2, $3, 'issued')
+      RETURNING id
+      `,
+      [consultation.id, "", consultation.medical_center_id ?? null]
+    );
+
+    prescriptionId = prescriptionResult.rows[0].id;
+  } else {
+    await client.query(
+      `
+      UPDATE prescriptions
+      SET status = CASE WHEN dispensed_at IS NULL THEN 'issued' ELSE status END
+      WHERE id = $1
+      `,
+      [prescriptionId]
+    );
+  }
+
+  await syncPrescriptionItems(client, prescriptionId, medicines);
+
+  const qrState = await ensurePrescriptionQrToken(client, {
+    prescriptionId,
+    consultationId: consultation.id,
+    patientId: consultation.patient_id,
+    doctorId: consultation.doctor_id,
+    medicalCenterId: consultation.medical_center_id ?? null,
+    qrCode: existingPrescription.rows[0]?.qr_code ?? null,
+    isDispensed: Boolean(existingPrescription.rows[0]?.dispensed_at),
+  });
+
+  await createAuditLogWithClient(client, {
+    actorUserId: userId,
+    actorRole: "doctor",
+    userId,
+    action: existingPrescription.rows[0]?.id ? "prescription_updated" : "prescription_created",
+    entityType: "prescription",
+    entityId: prescriptionId,
+    metadata: {
+      consultationId: consultation.id,
+      patientId: consultation.patient_id,
+      queueId: consultation.queue_id ?? null,
+      medicineCount: Array.isArray(medicines) ? medicines.length : 0,
+    },
+  });
+
+  const qrData = buildPrescriptionDeepLink(qrState.qrToken);
+  const qrImage = qrData ? await QRCode.toDataURL(qrData) : null;
+
+  return {
+    prescriptionId,
+    qrToken: qrState.qrToken,
+    qrData,
+    qrImage,
+    created: !existingPrescription.rows[0]?.id,
+  };
+};
+
+export const issuePrescriptionForConsultationRecord = async (
+  consultationId: string,
+  userId: number,
+  medicines?: any[]
+) => {
   const client = await pool.connect();
   let committed = false;
 
@@ -560,7 +757,7 @@ export const completeConsultationRecord = async (consultationId: string, userId:
     }
 
     const medsFromBody = Array.isArray(medicines) ? medicines : null;
-    const medsFromDb = Array.isArray(consultation.medicines) ? consultation.medicines : [];
+    const medsFromDb = normalizeMedicineList(consultation.medicines);
     const meds = medsFromBody ?? medsFromDb;
 
     const validationError = validateMedicines(meds, true);
@@ -581,19 +778,159 @@ export const completeConsultationRecord = async (consultationId: string, userId:
       });
     }
 
-    const existingPrescription = await client.query<{ id: number }>(
-      `
-      SELECT id
-      FROM prescriptions
-      WHERE consultation_id = $1
-      LIMIT 1
-      FOR UPDATE
-      `,
+    consultation = (
+      await client.query(
+        `
+        UPDATE consultations
+        SET symptoms = COALESCE($2, symptoms),
+            diagnosis = COALESCE($3, diagnosis),
+            notes = COALESCE($4, notes),
+            medicines = $5,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+        `,
+        [
+          consultation.id,
+          consultation.symptoms ?? null,
+          consultation.diagnosis ?? null,
+          consultation.notes ?? null,
+          JSON.stringify(meds),
+        ]
+      )
+    ).rows[0];
+
+    const prescription = await ensurePrescriptionForConsultation({
+      client,
+      consultation,
+      medicines: meds,
+      userId,
+    });
+
+    await client.query(
+      `UPDATE consultations SET status = 'active' WHERE id = $1 AND COALESCE(status, 'draft') <> 'completed'`,
       [consultation.id]
     );
 
-    if (existingPrescription.rows[0]?.id) {
-      throw createStatusError("Prescription already issued for this consultation", 409);
+    await updateNearestBookingStatus(client, {
+      doctorId: Number(consultation.doctor_id),
+      patientId: Number(consultation.patient_id),
+      nextStatus: BOOKING_STATUS.IN_PROGRESS,
+      allowedCurrentStatuses: [BOOKING_STATUS.IN_PROGRESS, BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
+    });
+
+    await client.query("COMMIT");
+    committed = true;
+
+    emitPrescriptionUpdated({
+      prescriptionId: prescription.prescriptionId,
+      patientId: consultation.patient_id,
+      status: "issued",
+      metadata: {
+        consultationId: consultation.id,
+        queueId: consultation.queue_id ?? null,
+      },
+    });
+
+    try {
+      if (consultation.patient_id) {
+        io.to(`patient_${consultation.patient_id}`).emit("prescription:ready", {
+          patientId: consultation.patient_id,
+          prescriptionId: prescription.prescriptionId,
+        });
+      }
+    } catch (error) {
+      console.error("Prescription socket emit error:", error);
+    }
+
+    return {
+      success: true,
+      message: "Prescription issued successfully",
+      consultationId: consultation.id,
+      prescriptionId: prescription.prescriptionId,
+      qr: prescription.qrImage,
+      qrData: prescription.qrData,
+      token: prescription.qrToken,
+    };
+  } catch (error) {
+    if (!committed) {
+      await client.query("ROLLBACK");
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+export const completeConsultationRecord = async (
+  consultationId: string,
+  userId: number,
+  medicines?: any[]
+) => {
+  const client = await pool.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+
+    const consultationResult = await client.query(
+      `
+      SELECT *
+      FROM consultations
+      WHERE id = $1
+      LIMIT 1
+      FOR UPDATE
+      `,
+      [consultationId]
+    );
+
+    if (consultationResult.rows.length === 0) {
+      throw createStatusError("Consultation not found", 404);
+    }
+
+    let consultation = consultationResult.rows[0];
+    consultation = await ensureDoctorOwnsConsultation(client, consultation, userId);
+
+    if (String(consultation.status || "").toLowerCase() === "completed") {
+      throw createStatusError("Consultation is already completed", 409);
+    }
+
+    if (!consultation.queue_id || !consultation.patient_id) {
+      throw createStatusError("Consultation is not linked to an active queue entry", 409);
+    }
+
+    const queueContext = await ensureQueuePatientContext(client, {
+      queueId: Number(consultation.queue_id),
+      patientId: Number(consultation.patient_id),
+      doctorUserId: userId,
+    });
+
+    if (
+      queueContext.consultation_id &&
+      String(queueContext.consultation_id) !== String(consultation.id)
+    ) {
+      throw createStatusError("Queue entry is linked to a different consultation", 409);
+    }
+
+    const medsFromBody = Array.isArray(medicines) ? medicines : null;
+    const medsFromDb = normalizeMedicineList(consultation.medicines);
+    const meds = medsFromBody ?? medsFromDb;
+
+    if (meds.length > 0) {
+      const validationError = validateMedicines(meds, true);
+      if (validationError) {
+        throw createStatusError(validationError, 400);
+      }
+
+      const conflictList = await findMedicineConflicts(
+        meds.map((med: any) => normalizeMedName(med?.name ?? med?.medicine_name))
+      );
+
+      if (conflictList.length > 0) {
+        throw Object.assign(createStatusError("Medicine conflict detected", 400), {
+          conflicts: conflictList,
+        });
+      }
     }
 
     consultation = (
@@ -619,46 +956,22 @@ export const completeConsultationRecord = async (consultationId: string, userId:
       )
     ).rows[0];
 
-    const prescriptionResult = await client.query<{ id: number }>(
-      `
-      INSERT INTO prescriptions (consultation_id, qr_code, medical_center_id)
-      VALUES ($1, $2, $3)
-      RETURNING id
-      `,
-      [consultation.id, "", consultation.medical_center_id ?? null]
-    );
+    let prescription: null | {
+      prescriptionId: number;
+      qrToken: string | null;
+      qrData: string | null;
+      qrImage: string | null;
+      created: boolean;
+    } = null;
 
-    const prescriptionId = prescriptionResult.rows[0].id;
-    const token = createPrescriptionQrToken({
-      prescriptionId,
-      consultationId: consultation.id,
-      patientId: consultation.patient_id,
-      doctorId: consultation.doctor_id,
-      medicalCenterId: consultation.medical_center_id ?? null,
-    });
-    const qrData = `https://healthlink.app/prescription/${token}`;
-    const qrImage = await QRCode.toDataURL(qrData);
-
-    await client.query(`UPDATE prescriptions SET qr_code = $1 WHERE id = $2`, [token, prescriptionId]);
-
-    if (Array.isArray(meds)) {
-      await insertPrescriptionItems(client, prescriptionId, meds);
+    if (meds.length > 0) {
+      prescription = await ensurePrescriptionForConsultation({
+        client,
+        consultation,
+        medicines: meds,
+        userId,
+      });
     }
-
-    await createAuditLogWithClient(client, {
-      actorUserId: userId,
-      actorRole: "doctor",
-      userId,
-      action: "prescription_created",
-      entityType: "prescription",
-      entityId: prescriptionId,
-      metadata: {
-        consultationId: consultation.id,
-        patientId: consultation.patient_id,
-        queueId: consultation.queue_id ?? null,
-        medicineCount: Array.isArray(meds) ? meds.length : 0,
-      },
-    });
 
     await client.query(
       `
@@ -681,15 +994,17 @@ export const completeConsultationRecord = async (consultationId: string, userId:
     await client.query("COMMIT");
     committed = true;
 
-    try {
-      if (consultation.patient_id) {
-        io.to(`patient_${consultation.patient_id}`).emit("prescription:ready", {
-          patientId: consultation.patient_id,
-          prescriptionId,
-        });
-      }
-    } catch (error) {
-      console.error("Prescription socket emit error:", error);
+    if (prescription) {
+      emitPrescriptionUpdated({
+        prescriptionId: prescription.prescriptionId,
+        patientId: consultation.patient_id,
+        status: "issued",
+        metadata: {
+          consultationId: consultation.id,
+          queueId: consultation.queue_id ?? null,
+          completed: true,
+        },
+      });
     }
 
     try {
@@ -720,66 +1035,75 @@ export const completeConsultationRecord = async (consultationId: string, userId:
           [consultation.queue_id]
         );
         const nextPatientToken = Number(nextWaitingResult.rows[0]?.token_number ?? null);
-        if (!nextPatientToken) {
-          return {
-            success: true,
-            prescriptionId,
-            qr: qrImage,
-            qrData,
-            token,
-          };
+        if (nextPatientToken) {
+          const nearTokenLimit = Number(nextPatientToken) + 2;
+          const nearResult = await pool.query<{ expo_push_token: string | null }>(
+            `
+            SELECT pp.expo_push_token
+            FROM queue_patients qp
+            JOIN patient_profiles pp ON pp.user_id = qp.patient_id
+            WHERE qp.queue_id = $1
+              AND qp.status = 'WAITING'
+              AND qp.token_number <= $2
+            `,
+            [consultation.queue_id, nearTokenLimit]
+          );
+          const nearTokens = filterExpoTokens(nearResult.rows.map((row) => row.expo_push_token));
+          await sendExpoPush(
+            nearTokens.map((tokenValue) => ({
+              to: tokenValue,
+              title: "Your Turn Soon",
+              body: "Only a couple of patients left before your turn.",
+              data: { queueId: consultation.queue_id },
+            }))
+          );
         }
-
-        const nearTokenLimit = Number(nextPatientToken) + 2;
-        const nearResult = await pool.query<{ expo_push_token: string | null }>(
-          `
-          SELECT pp.expo_push_token
-          FROM queue_patients qp
-          JOIN patient_profiles pp ON pp.user_id = qp.patient_id
-          WHERE qp.queue_id = $1
-            AND qp.status = 'WAITING'
-            AND qp.token_number <= $2
-          `,
-          [consultation.queue_id, nearTokenLimit]
-        );
-        const nearTokens = filterExpoTokens(nearResult.rows.map((row) => row.expo_push_token));
-        await sendExpoPush(
-          nearTokens.map((tokenValue) => ({
-            to: tokenValue,
-            title: "Your Turn Soon",
-            body: "Only a couple of patients left before your turn.",
-            data: { queueId: consultation.queue_id },
-          }))
-        );
       }
     } catch (error) {
       console.error("Near turn push error:", error);
     }
 
-    try {
-      const tokenResult = await pool.query<{ expo_push_token: string | null }>(
-        `SELECT expo_push_token FROM patient_profiles WHERE user_id = $1`,
-        [consultation.patient_id]
-      );
-      const tokens = filterExpoTokens(tokenResult.rows.map((row) => row.expo_push_token));
-      await sendExpoPush(
-        tokens.map((tokenValue) => ({
-          to: tokenValue,
-          title: "Prescription Ready",
-          body: "A new prescription is available in your app.",
-          data: { prescriptionId },
-        }))
-      );
-    } catch (error) {
-      console.error("Prescription push error:", error);
+    if (prescription) {
+      try {
+        if (consultation.patient_id) {
+          io.to(`patient_${consultation.patient_id}`).emit("prescription:ready", {
+            patientId: consultation.patient_id,
+            prescriptionId: prescription.prescriptionId,
+          });
+        }
+      } catch (error) {
+        console.error("Prescription socket emit error:", error);
+      }
+
+      try {
+        const tokenResult = await pool.query<{ expo_push_token: string | null }>(
+          `SELECT expo_push_token FROM patient_profiles WHERE user_id = $1`,
+          [consultation.patient_id]
+        );
+        const tokens = filterExpoTokens(tokenResult.rows.map((row) => row.expo_push_token));
+        await sendExpoPush(
+          tokens.map((tokenValue) => ({
+            to: tokenValue,
+            title: "Prescription Ready",
+            body: "A new prescription is available in your app.",
+            data: { prescriptionId: prescription.prescriptionId },
+          }))
+        );
+      } catch (error) {
+        console.error("Prescription push error:", error);
+      }
     }
 
     return {
       success: true,
-      prescriptionId,
-      qr: qrImage,
-      qrData,
-      token,
+      message: prescription
+        ? "Consultation completed and prescription is ready."
+        : "Consultation completed without a prescription.",
+      consultationId: consultation.id,
+      prescriptionId: prescription?.prescriptionId ?? null,
+      qr: prescription?.qrImage ?? null,
+      qrData: prescription?.qrData ?? null,
+      token: prescription?.qrToken ?? null,
     };
   } catch (error) {
     if (!committed) {

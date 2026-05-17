@@ -26,12 +26,36 @@ type BookingRecord = {
   id: number;
   doctor_id: number;
   patient_id: number;
+  session_id?: number | null;
   medical_center_id?: string | null;
   date: string;
   time: string;
   status: string;
   started_at?: string | null;
   scheduled_at?: string | Date | null;
+};
+
+type PatientBookingRow = BookingRecord & {
+  doctor_name?: string | null;
+  medical_center_name?: string | null;
+  session_date?: string | null;
+  session_start_time?: string | null;
+  session_end_time?: string | null;
+  queue_id?: number | null;
+  queue_status?: string | null;
+  queue_started_at?: string | null;
+  queue_ended_at?: string | null;
+  queue_patient_status?: string | null;
+  queue_token_number?: number | null;
+  queue_checked_in_at?: string | null;
+  queue_missed_at?: string | null;
+  current_serving_token?: number | null;
+  waiting_count?: number | null;
+};
+
+type PatientActiveQueueOptions = {
+  appointmentId?: number | null;
+  sessionId?: number | null;
 };
 
 const createStatusError = (message: string, statusCode: number) => {
@@ -64,8 +88,224 @@ const resolveDoctorProfileId = async (doctorIdentifier: number) => {
   return result.rows[0]?.id ?? null;
 };
 
+const CLOSED_BOOKING_STATUSES = new Set<string>([
+  BOOKING_STATUS.CANCELLED,
+  BOOKING_STATUS.COMPLETED,
+  BOOKING_STATUS.MISSED,
+]);
+
+const isClosedBookingStatus = (status: string) => CLOSED_BOOKING_STATUSES.has(status);
+
+const isQueuePatientActive = (status?: string | null) =>
+  ["WAITING", "WITH_DOCTOR"].includes(String(status || "").trim().toUpperCase());
+
+const isQueueLive = (status?: string | null) =>
+  ["LIVE", "PAUSED"].includes(String(status || "").trim().toUpperCase());
+
+const isTodayDate = (value?: string | null) => {
+  if (!value) return false;
+  const now = new Date();
+  const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
+    now.getDate()
+  ).padStart(2, "0")}`;
+  return String(value).slice(0, 10) === current;
+};
+
+const isFutureDate = (value?: string | null) => {
+  if (!value) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return parsed.getTime() > today.getTime();
+};
+
+const buildSessionTimeLabel = (booking: PatientBookingRow) => {
+  const startTime = String(booking.session_start_time || "").slice(0, 5);
+  const endTime = String(booking.session_end_time || "").slice(0, 5);
+  if (startTime && endTime) return `${startTime} - ${endTime}`;
+  if (startTime) return startTime;
+  return String(booking.time || "").slice(0, 5) || null;
+};
+
+const toPatientQueuePayload = (
+  booking: PatientBookingRow | null,
+  status: string,
+  overrides?: Partial<Record<string, unknown>>
+) => {
+  if (!booking) {
+    return {
+      active: false,
+      status: "none",
+      ...overrides,
+    };
+  }
+
+  const tokenNumber = Number(booking.queue_token_number ?? 0) || null;
+  const currentServingNumber = Number(booking.current_serving_token ?? 0) || null;
+  const remainingAhead =
+    tokenNumber && currentServingNumber !== null
+      ? Math.max(tokenNumber - currentServingNumber - (status === "next" ? 1 : 0), 0)
+      : null;
+
+  return {
+    active: status !== "none",
+    status,
+    appointmentId: booking.id,
+    queueId: booking.queue_id ?? null,
+    doctorId: booking.doctor_id,
+    clinicId: booking.medical_center_id ?? null,
+    sessionId: booking.session_id ?? null,
+    doctorName: booking.doctor_name ?? "Doctor",
+    medicalCenterName: booking.medical_center_name ?? "Medical Center",
+    scheduledTime: booking.scheduled_at ? new Date(booking.scheduled_at).toISOString() : null,
+    sessionTime: buildSessionTimeLabel(booking),
+    queueStarted: isQueueLive(booking.queue_status),
+    queueStatus: booking.queue_status ?? null,
+    patientQueueStatus: booking.queue_patient_status ?? null,
+    tokenNumber,
+    queueNumber: tokenNumber,
+    currentServingNumber,
+    currentServingToken: currentServingNumber,
+    position: remainingAhead,
+    estimatedWaitMinutes:
+      remainingAhead !== null ? Math.max(remainingAhead, 0) * 10 : Number(booking.waiting_count ?? 0) * 10,
+    waitingCount: Number(booking.waiting_count ?? 0),
+    message: null,
+    ...overrides,
+  };
+};
+
 export const listPatientBookings = async (patientId: number) => {
   return syncAndFetchPatientBookings(patientId);
+};
+
+export const getPatientActiveQueueState = async (
+  patientId: number,
+  options: PatientActiveQueueOptions = {}
+) => {
+  const bookings = (await syncAndFetchPatientBookings(patientId)) as PatientBookingRow[];
+  const scopedBookings = bookings.filter((booking) => {
+    if (options.appointmentId && Number(booking.id) !== Number(options.appointmentId)) {
+      return false;
+    }
+    if (options.sessionId && Number(booking.session_id) !== Number(options.sessionId)) {
+      return false;
+    }
+    return true;
+  });
+
+  if ((options.appointmentId || options.sessionId) && scopedBookings.length === 0) {
+    throw createStatusError("Appointment queue details not found", 404);
+  }
+
+  const activeQueueBooking =
+    scopedBookings.find(
+      (booking) =>
+        isQueueLive(booking.queue_status) &&
+        isQueuePatientActive(booking.queue_patient_status)
+    ) ?? null;
+
+  if (activeQueueBooking) {
+    const patientQueueStatus = String(activeQueueBooking.queue_patient_status || "").toUpperCase();
+    const currentServingNumber = Number(activeQueueBooking.current_serving_token ?? 0) || 0;
+    const tokenNumber = Number(activeQueueBooking.queue_token_number ?? 0) || 0;
+    const status =
+      patientQueueStatus === "MISSED"
+        ? "missed"
+        : patientQueueStatus === "WITH_DOCTOR" || (tokenNumber > 0 && tokenNumber <= currentServingNumber + 1)
+          ? "next"
+          : "waiting";
+
+    return toPatientQueuePayload(activeQueueBooking, status, {
+      checkInState: "checked_in",
+      message:
+        status === "next"
+          ? "Your turn is close. Please stay near the consultation room."
+          : "Queue is active for this appointment.",
+    });
+  }
+
+  const missedQueueBooking =
+    scopedBookings.find(
+      (booking) =>
+        String(booking.queue_patient_status || "").trim().toUpperCase() === "MISSED" ||
+        booking.status === BOOKING_STATUS.MISSED
+    ) ?? null;
+
+  if (missedQueueBooking && isTodayDate(missedQueueBooking.date)) {
+    return toPatientQueuePayload(missedQueueBooking, "missed", {
+      checkInState: "missed",
+      message: "This appointment was marked missed.",
+    });
+  }
+
+  const liveButNotCheckedInBooking =
+    scopedBookings.find(
+      (booking) =>
+        isTodayDate(booking.date) &&
+        isQueueLive(booking.queue_status) &&
+        !isClosedBookingStatus(booking.status) &&
+        !isQueuePatientActive(booking.queue_patient_status)
+    ) ?? null;
+
+  if (liveButNotCheckedInBooking) {
+    const bookingStatus = normalizeBookingStatus(liveButNotCheckedInBooking.status);
+    return toPatientQueuePayload(
+      liveButNotCheckedInBooking,
+      bookingStatus === BOOKING_STATUS.CONFIRMED ? "check_in_required" : "queue_live",
+      {
+        checkInState: bookingStatus === BOOKING_STATUS.CONFIRMED ? "pending" : "required",
+        message:
+          bookingStatus === BOOKING_STATUS.CONFIRMED
+            ? "Waiting for receptionist queue check-in."
+            : "Check in at reception to join the live queue.",
+      }
+    );
+  }
+
+  const todayAppointment =
+    scopedBookings.find(
+      (booking) =>
+        isTodayDate(booking.date) &&
+        !isClosedBookingStatus(booking.status)
+    ) ?? null;
+
+  if (todayAppointment) {
+    return toPatientQueuePayload(todayAppointment, "today_appointment", {
+      checkInState: "not_started",
+      message: "Today's appointment is booked. Queue tracking will appear when the session starts.",
+    });
+  }
+
+  const futureAppointment =
+    scopedBookings.find(
+      (booking) =>
+        isFutureDate(booking.date) &&
+        !isClosedBookingStatus(booking.status)
+    ) ?? null;
+
+  if (futureAppointment) {
+    return toPatientQueuePayload(futureAppointment, "appointment_booked", {
+      checkInState: "upcoming",
+      message: "Upcoming appointment booked.",
+    });
+  }
+
+  if (options.appointmentId || options.sessionId) {
+    const closedBooking = scopedBookings[0] ?? null;
+    if (closedBooking) {
+      return toPatientQueuePayload(closedBooking, "none", {
+        active: false,
+        message: "This appointment is not part of an active queue.",
+      });
+    }
+  }
+
+  return {
+    active: false,
+    status: "none",
+  };
 };
 
 export const cancelPatientBooking = async (patientId: number, bookingId: number) => {

@@ -51,7 +51,7 @@ describe("payment controller", () => {
       paymentId: 501,
       gateway: "payhere",
       checkoutUrl: "https://sandbox.payhere.lk/pay/checkout",
-      hostedUrl: "https://demo.healthlink.app/api/payments/payhere/hosted/501?token=abc",
+      hostedUrl: "https://adithyadewmini.com/api/payments/payhere/hosted/501?token=abc",
       hostedToken: "abc",
       fields: {
         merchant_id: "123",
@@ -129,9 +129,9 @@ describe("payment controller", () => {
       html: "<html><body>PayHere</body></html>",
       formFields: {
         merchant_id: "1235775",
-        return_url: "https://www.adithyadewmini.com/payment/return",
-        cancel_url: "https://www.adithyadewmini.com/payment/cancel",
-        notify_url: "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/notify",
+        return_url: "https://adithyadewmini.com/payment/return",
+        cancel_url: "https://adithyadewmini.com/payment/cancel",
+        notify_url: "https://adithyadewmini.com/api/payments/payhere/notify",
         order_id: "21",
         items: "HealthLink Pharmacy order #21",
         currency: "LKR",

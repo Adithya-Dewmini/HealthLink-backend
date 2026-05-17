@@ -39,7 +39,7 @@ import {
   updateReceptionAppointmentStatus,
 } from "../services/receptionQueue.service";
 
-type HttpError = Error & { statusCode?: number; details?: string[] };
+type HttpError = Error & { statusCode?: number; details?: string[]; code?: string };
 
 type QueueActionBody = {
   sessionId?: number | string | null;
@@ -134,6 +134,7 @@ const handleControllerError = (res: Response, error: unknown, fallbackMessage: s
   return res.status(Number(appError?.statusCode) || 500).json({
     success: false,
     message: appError?.message || fallbackMessage,
+    ...(typeof appError?.code === "string" && appError.code.trim() ? { code: appError.code } : {}),
     ...(Array.isArray(appError?.details) && appError.details.length > 0
       ? { details: appError.details }
       : {}),

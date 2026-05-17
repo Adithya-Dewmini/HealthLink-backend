@@ -29,6 +29,10 @@ type AddPatientBody = {
   name?: string;
 };
 
+type CallPatientBody = {
+  queuePatientId?: number | string | null;
+};
+
 type DoctorQueueRequest<TBody = Record<string, unknown>> = AuthenticatedRequest<TBody>;
 type HttpError = Error & { statusCode?: number };
 
@@ -37,7 +41,7 @@ type QueueRow = {
   doctor_id: number;
   status: string;
   shift_id: number | null;
-  schedule_id: number | null;
+  schedule_id?: number | null;
   shift_date: string;
   medical_center_id: string | null;
 };
@@ -47,6 +51,7 @@ type QueuePatientRow = {
   patient_id: number;
   token_number: number;
   consultation_id: number | null;
+  status?: string;
 };
 
 const { APP_DATE_SQL } = doctorQueueSql;
@@ -137,6 +142,135 @@ const loadDoctorTokens = async (doctorId: number) => {
   );
 
   return filterExpoTokens(tokenResult.rows.map((row) => row.expo_push_token));
+};
+
+const activateQueuePatientForDoctor = async (
+  client: PoolClient,
+  input: {
+    queue: QueueRow;
+    doctorProfileId: number;
+    doctorUserId: number;
+    queuePatientId?: number | string | null;
+  }
+) => {
+  const activePatientResult = await client.query<QueuePatientRow>(
+    `
+    SELECT *
+    FROM queue_patients
+    WHERE queue_id = $1
+      AND status = 'WITH_DOCTOR'
+    ORDER BY started_at DESC NULLS LAST, token_number ASC
+    LIMIT 1
+    FOR UPDATE
+    `,
+    [input.queue.id]
+  );
+
+  if (activePatientResult.rows[0]) {
+    throw Object.assign(
+      new Error("Finish or skip the current patient before calling the next patient"),
+      {
+        statusCode: 409,
+      }
+    );
+  }
+
+  const nextPatientResult = input.queuePatientId
+    ? await client.query<QueuePatientRow>(
+        `
+        SELECT *
+        FROM queue_patients
+        WHERE queue_id = $1
+          AND id = $2
+          AND status = 'WAITING'
+        LIMIT 1
+        FOR UPDATE
+        `,
+        [input.queue.id, input.queuePatientId]
+      )
+    : await client.query<QueuePatientRow>(
+        `
+        SELECT *
+        FROM queue_patients
+        WHERE queue_id = $1
+          AND status = 'WAITING'
+        ORDER BY token_number ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+        `,
+        [input.queue.id]
+      );
+
+  const nextPatient = nextPatientResult.rows[0];
+  if (!nextPatient) {
+    throw Object.assign(
+      new Error(
+        input.queuePatientId ? "Selected patient is no longer waiting in this queue" : "No patients waiting yet"
+      ),
+      {
+        statusCode: input.queuePatientId ? 404 : 409,
+      }
+    );
+  }
+
+  const updatedPatientResult = await client.query<QueuePatientRow>(
+    `
+    UPDATE queue_patients
+    SET status = 'WITH_DOCTOR',
+        started_at = NOW()
+    WHERE id = $1
+    RETURNING *
+    `,
+    [nextPatient.id]
+  );
+
+  await updateNearestBookingStatus(client, {
+    doctorId: Number(input.doctorProfileId),
+    patientId: Number(nextPatient.patient_id),
+    nextStatus: BOOKING_STATUS.IN_PROGRESS,
+    allowedCurrentStatuses: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
+    setStartedAt: true,
+  });
+
+  let consultationId = nextPatient.consultation_id ?? null;
+  if (!consultationId) {
+    const consultationResult = await client.query<{ id: number }>(
+      `
+      INSERT INTO consultations
+        (patient_id, doctor_id, queue_id, symptoms, diagnosis, notes, medicines, medical_center_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id
+      `,
+      [
+        nextPatient.patient_id,
+        input.doctorUserId,
+        input.queue.id,
+        null,
+        null,
+        null,
+        JSON.stringify([]),
+        input.queue.medical_center_id ?? null,
+      ]
+    );
+
+    consultationId = consultationResult.rows[0]?.id ?? null;
+
+    if (consultationId) {
+      await client.query(
+        `
+        UPDATE queue_patients
+        SET consultation_id = $1
+        WHERE id = $2
+        `,
+        [consultationId, nextPatient.id]
+      );
+    }
+  }
+
+  return {
+    patient: updatedPatientResult.rows[0],
+    consultationId,
+  };
 };
 
 export const startQueue = async (
@@ -559,41 +693,18 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
       return res.status(400).json({ message: "No LIVE queue found today" });
     }
 
-    const activePatientResult = await client.query<QueuePatientRow>(
+    const waitingPatientCount = await client.query<{ id: number }>(
       `
-      SELECT *
-      FROM queue_patients
-      WHERE queue_id = $1
-        AND status = 'WITH_DOCTOR'
-      ORDER BY started_at DESC NULLS LAST, token_number ASC
-      LIMIT 1
-      FOR UPDATE
-      `,
-      [queue.id]
-    );
-
-    if (activePatientResult.rows[0]) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({
-        message: "Finish or skip the current patient before calling the next patient",
-      });
-    }
-
-    const nextPatientResult = await client.query<QueuePatientRow>(
-      `
-      SELECT *
+      SELECT id
       FROM queue_patients
       WHERE queue_id = $1
         AND status = 'WAITING'
-      ORDER BY token_number ASC
-      FOR UPDATE SKIP LOCKED
       LIMIT 1
       `,
       [queue.id]
     );
 
-    const nextPatient = nextPatientResult.rows[0];
-    if (!nextPatient) {
+    if (!waitingPatientCount.rows[0]) {
       await client.query("COMMIT");
 
       broadcastQueueUpdate(doctorId, {
@@ -621,65 +732,17 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
       return res.status(409).json({ message: "No patients waiting yet" });
     }
 
-    const updatedPatientResult = await client.query<QueuePatientRow>(
-      `
-      UPDATE queue_patients
-      SET status = 'WITH_DOCTOR',
-          started_at = NOW()
-      WHERE id = $1
-      RETURNING *
-      `,
-      [nextPatient.id]
-    );
-
-    await updateNearestBookingStatus(client, {
-      doctorId: Number(doctorId),
-      patientId: Number(nextPatient.patient_id),
-      nextStatus: BOOKING_STATUS.IN_PROGRESS,
-      allowedCurrentStatuses: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.BOOKED],
-      setStartedAt: true,
+    const activation = await activateQueuePatientForDoctor(client, {
+      queue,
+      doctorProfileId: doctorId,
+      doctorUserId: userId,
     });
-
-    let consultationId = nextPatient.consultation_id ?? null;
-    if (!consultationId) {
-      const consultationResult = await client.query<{ id: number }>(
-        `
-        INSERT INTO consultations
-          (patient_id, doctor_id, queue_id, symptoms, diagnosis, notes, medicines, medical_center_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id
-        `,
-        [
-          nextPatient.patient_id,
-          userId,
-          queue.id,
-          null,
-          null,
-          null,
-          JSON.stringify([]),
-          queue.medical_center_id ?? null,
-        ]
-      );
-
-      consultationId = consultationResult.rows[0]?.id ?? null;
-
-      if (consultationId) {
-        await client.query(
-          `
-          UPDATE queue_patients
-          SET consultation_id = $1
-          WHERE id = $2
-          `,
-          [consultationId, nextPatient.id]
-        );
-      }
-    }
 
     await client.query("COMMIT");
     committed = true;
 
     try {
-      const currentToken = updatedPatientResult.rows[0]?.token_number ?? nextPatient.token_number;
+      const currentToken = activation.patient?.token_number ?? 0;
       const nearTokenLimit = Number(currentToken) + 2;
       const nearResult = await pool.query<{ expo_push_token: string | null }>(
         `
@@ -730,8 +793,8 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
 
     return res.json({
       message: "Moved to next patient",
-      patient: updatedPatientResult.rows[0],
-      consultationId,
+      patient: activation.patient,
+      consultationId: activation.consultationId,
       queueId: queue.id,
     });
   } catch (error) {
@@ -739,6 +802,68 @@ export const moveToNextPatient = async (req: DoctorQueueRequest, res: Response) 
       await client.query("ROLLBACK");
     }
     console.error("Next patient error:", error);
+    return handleControllerError(res, error, "Server error");
+  } finally {
+    client.release();
+  }
+};
+
+export const callPatient = async (
+  req: DoctorQueueRequest<CallPatientBody>,
+  res: Response
+) => {
+  const client = await pool.connect();
+  let committed = false;
+
+  try {
+    await client.query("BEGIN");
+
+    const userId = getDoctorUserId(req);
+    const doctorId = await requireDoctorIdForUser(userId, client);
+    const queuePatientId = req.body?.queuePatientId ?? null;
+
+    if (!queuePatientId) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: "queuePatientId is required" });
+    }
+
+    const queue = await getLiveQueueForDoctorToday(doctorId, client);
+
+    if (!queue) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "No active LIVE queue found today" });
+    }
+
+    const activation = await activateQueuePatientForDoctor(client, {
+      queue,
+      doctorProfileId: doctorId,
+      doctorUserId: userId,
+      queuePatientId,
+    });
+
+    await client.query("COMMIT");
+    committed = true;
+
+    broadcastQueueUpdate(doctorId, {
+      queueId: queue.id,
+      type: "PATIENT_CALLED",
+      triggeredBy: req.user?.role,
+      patientId: activation.patient.patient_id,
+      medicalCenterId: queue.medical_center_id,
+      sessionId: queue.schedule_id,
+    });
+
+    return res.json({
+      message: "Patient called successfully",
+      patient: activation.patient,
+      consultationId: activation.consultationId,
+      queueId: queue.id,
+    });
+  } catch (error) {
+    if (!committed) {
+      await client.query("ROLLBACK");
+    }
+    console.error("Call patient error:", error);
     return handleControllerError(res, error, "Server error");
   } finally {
     client.release();

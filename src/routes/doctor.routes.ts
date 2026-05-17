@@ -32,6 +32,7 @@ import {
 import { getDoctorRoutineController } from "../controllers/doctorRoutine.controller";
 import {
   addPatientToQueue,
+  callPatient,
   endQueue,
   moveToNextPatient,
   pauseQueue,
@@ -89,6 +90,7 @@ router.post("/queue/start", authenticateToken, startQueue);
 router.post("/queue/pause", authenticateToken, pauseQueue);
 router.post("/queue/resume", authenticateToken, resumeQueue);
 router.post("/queue/add-patient", authenticateToken, addPatientToQueue);
+router.post("/queue/call", authenticateToken, callPatient);
 router.post("/queue/next", authenticateToken, moveToNextPatient);
 router.post("/queue/skip", authenticateToken, skipPatient);
 router.post("/queue/end", authenticateToken, endQueue);

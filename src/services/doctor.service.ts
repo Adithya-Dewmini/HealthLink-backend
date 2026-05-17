@@ -1,6 +1,7 @@
 import pool from "../config/db";
 import { env } from "../config/env";
 import { markInvalidClinicSchedulesForDoctor } from "./schedule.service";
+import { BOOKING_STATUS } from "../utils/bookingLifecycle";
 
 export type DoctorAvailabilityInput = {
   day: string;
@@ -47,6 +48,12 @@ type QueuePatientRow = {
   status: string;
   name: string;
   profile_image: string | null;
+  consultation_id?: number | null;
+  appointment_time?: string | null;
+  is_walkin?: boolean;
+  completed_at?: string | null;
+  missed_at?: string | null;
+  started_at?: string | null;
 };
 
 const AVAILABILITY_DAY_ORDER_SQL = `
@@ -357,6 +364,7 @@ export const getDoctorDashboardData = async (userId: number) => {
     `
     SELECT 
       d.id AS doctor_id,
+      u.id AS user_id,
       u.name,
       u.email,
       u.profile_image,
@@ -375,29 +383,293 @@ export const getDoctorDashboardData = async (userId: number) => {
   }
 
   const doctor = doctorResult.rows[0];
-  const activeShiftId = await getActiveShiftId(doctor.doctor_id);
+  const doctorId = Number(doctor.doctor_id);
+  const nonCancelledStatuses = [
+    BOOKING_STATUS.BOOKED,
+    BOOKING_STATUS.CONFIRMED,
+    BOOKING_STATUS.IN_PROGRESS,
+    BOOKING_STATUS.COMPLETED,
+    BOOKING_STATUS.MISSED,
+  ];
 
-  const queueResult = await pool.query(
-    `
-    SELECT * FROM queues
-    WHERE doctor_id = $1
-      AND shift_date = ${APP_DATE_SQL}
-      AND ($2::int IS NULL OR shift_id = $2)
-    ORDER BY created_at DESC
-    LIMIT 1
-    `,
-    [doctor.doctor_id, activeShiftId]
-  );
+  const [todayResult, upcomingResult, liveQueueMetaResult, liveSessionResult, nextSessionResult] =
+    await Promise.all([
+      pool.query<{
+        date_key: string;
+        session_count: string | number;
+        appointment_count: string | number;
+      }>(
+        `
+        SELECT
+          ${APP_DATE_SQL}::text AS date_key,
+          (
+            SELECT COUNT(*)::int
+            FROM medical_center_doctor_schedule s
+            WHERE s.doctor_profile_id = $1
+              AND s.date = ${APP_DATE_SQL}
+              AND s.is_active = TRUE
+          ) AS session_count,
+          (
+            SELECT COUNT(*)::int
+            FROM bookings b
+            WHERE b.doctor_id = $1
+              AND b.date = ${APP_DATE_SQL}
+              AND COALESCE(UPPER(b.status), '${BOOKING_STATUS.BOOKED}') = ANY($2::text[])
+          ) AS appointment_count
+        `,
+        [doctorId, nonCancelledStatuses]
+      ),
+      pool.query<{
+        session_count: string | number;
+        appointment_count: string | number;
+      }>(
+        `
+        SELECT
+          (
+            SELECT COUNT(*)::int
+            FROM medical_center_doctor_schedule s
+            WHERE s.doctor_profile_id = $1
+              AND s.is_active = TRUE
+              AND (
+                s.date > ${APP_DATE_SQL}
+                OR (s.date = ${APP_DATE_SQL} AND s.start_time > ${APP_TIME_SQL})
+              )
+          ) AS session_count,
+          (
+            SELECT COUNT(*)::int
+            FROM bookings b
+            WHERE b.doctor_id = $1
+              AND COALESCE(UPPER(b.status), '${BOOKING_STATUS.BOOKED}') = ANY($2::text[])
+              AND (
+                b.date > ${APP_DATE_SQL}
+                OR (b.date = ${APP_DATE_SQL} AND b.time > ${APP_TIME_SQL})
+              )
+          ) AS appointment_count
+        `,
+        [doctorId, nonCancelledStatuses]
+      ),
+      pool.query<{ live_count: string | number }>(
+        `
+        SELECT COUNT(*)::int AS live_count
+        FROM queues q
+        WHERE q.doctor_id = $1
+          AND q.shift_date = ${APP_DATE_SQL}
+          AND q.status IN ('LIVE', 'PAUSED')
+        `,
+        [doctorId]
+      ),
+      pool.query<{
+        session_id: number | null;
+        queue_id: number;
+        medical_center_id: string | null;
+        medical_center_name: string | null;
+        session_date: string | null;
+        start_time: string | null;
+        end_time: string | null;
+        queue_status: string;
+        total_appointments: string | number;
+        checked_in_count: string | number;
+        waiting_count: string | number;
+        current_serving_number: string | number | null;
+        next_queue_number: string | number | null;
+      }>(
+        `
+        WITH live_queue AS (
+          SELECT
+            q.id AS queue_id,
+            q.schedule_id AS session_id,
+            q.medical_center_id,
+            q.status AS queue_status,
+            q.started_at,
+            q.created_at,
+            s.date::text AS session_date,
+            s.start_time::text AS start_time,
+            s.end_time::text AS end_time,
+            mc.name AS medical_center_name
+          FROM queues q
+          LEFT JOIN medical_center_doctor_schedule s ON s.id = q.schedule_id
+          LEFT JOIN medical_centers mc
+            ON mc.id = COALESCE(q.medical_center_id, s.medical_center_id)
+          WHERE q.doctor_id = $1
+            AND q.shift_date = ${APP_DATE_SQL}
+            AND q.status IN ('LIVE', 'PAUSED')
+          ORDER BY COALESCE(q.started_at, q.created_at) DESC, q.id DESC
+          LIMIT 1
+        )
+        SELECT
+          live_queue.session_id,
+          live_queue.queue_id,
+          live_queue.medical_center_id,
+          live_queue.medical_center_name,
+          live_queue.session_date,
+          live_queue.start_time,
+          live_queue.end_time,
+          live_queue.queue_status,
+          (
+            SELECT COUNT(*)::int
+            FROM bookings b
+            WHERE b.doctor_id = $1
+              AND b.date = ${APP_DATE_SQL}
+              AND COALESCE(UPPER(b.status), '${BOOKING_STATUS.BOOKED}') = ANY($2::text[])
+              AND (
+                (live_queue.session_id IS NOT NULL AND b.session_id = live_queue.session_id)
+                OR (live_queue.session_id IS NULL)
+              )
+          ) AS total_appointments,
+          (
+            SELECT COUNT(*)::int
+            FROM queue_patients qp
+            WHERE qp.queue_id = live_queue.queue_id
+              AND qp.checked_in_at IS NOT NULL
+          ) AS checked_in_count,
+          (
+            SELECT COUNT(*)::int
+            FROM queue_patients qp
+            WHERE qp.queue_id = live_queue.queue_id
+              AND qp.status = 'WAITING'
+          ) AS waiting_count,
+          (
+            SELECT qp.token_number
+            FROM queue_patients qp
+            WHERE qp.queue_id = live_queue.queue_id
+              AND qp.status = 'WITH_DOCTOR'
+            ORDER BY qp.token_number ASC
+            LIMIT 1
+          ) AS current_serving_number,
+          (
+            SELECT qp.token_number
+            FROM queue_patients qp
+            WHERE qp.queue_id = live_queue.queue_id
+              AND qp.status = 'WAITING'
+            ORDER BY qp.token_number ASC
+            LIMIT 1
+          ) AS next_queue_number
+        FROM live_queue
+        `,
+        [doctorId, nonCancelledStatuses]
+      ),
+      pool.query<{
+        session_id: number;
+        session_date: string;
+        start_time: string | null;
+        end_time: string | null;
+        medical_center_name: string | null;
+        appointment_count: string | number;
+      }>(
+        `
+        SELECT
+          s.id AS session_id,
+          s.date::text AS session_date,
+          s.start_time::text AS start_time,
+          s.end_time::text AS end_time,
+          mc.name AS medical_center_name,
+          (
+            SELECT COUNT(*)::int
+            FROM bookings b
+            WHERE b.session_id = s.id
+              AND b.doctor_id = $1
+              AND COALESCE(UPPER(b.status), '${BOOKING_STATUS.BOOKED}') = ANY($2::text[])
+          ) AS appointment_count
+        FROM medical_center_doctor_schedule s
+        LEFT JOIN medical_centers mc ON mc.id = s.medical_center_id
+        WHERE s.doctor_profile_id = $1
+          AND s.is_active = TRUE
+          AND (
+            s.date > ${APP_DATE_SQL}
+            OR (s.date = ${APP_DATE_SQL} AND s.start_time > ${APP_TIME_SQL})
+          )
+        ORDER BY s.date ASC, s.start_time ASC, s.id ASC
+        LIMIT 1
+        `,
+        [doctorId, nonCancelledStatuses]
+      ),
+    ]);
 
-  const queue = queueResult.rows[0] || null;
+  const today = todayResult.rows[0] ?? {
+    date_key: new Date().toISOString().slice(0, 10),
+    session_count: 0,
+    appointment_count: 0,
+  };
+  const upcoming = upcomingResult.rows[0] ?? {
+    session_count: 0,
+    appointment_count: 0,
+  };
+  const liveQueueMeta = liveQueueMetaResult.rows[0] ?? null;
+  const liveSessionRow = liveSessionResult.rows[0] ?? null;
+  const nextSessionRow = nextSessionResult.rows[0] ?? null;
+
+  if (Number(liveQueueMeta?.live_count ?? 0) > 1) {
+    console.warn("[doctor.dashboard] Multiple live queues detected for doctor", {
+      doctorId,
+      liveQueueCount: Number(liveQueueMeta?.live_count ?? 0),
+    });
+  }
+
+  const liveSession = liveSessionRow
+    ? {
+        id: liveSessionRow.session_id ? String(liveSessionRow.session_id) : null,
+        queueId: String(liveSessionRow.queue_id),
+        doctorId: String(doctorId),
+        medicalCenterId: liveSessionRow.medical_center_id ?? null,
+        medicalCenterName: liveSessionRow.medical_center_name ?? "Clinic Session",
+        date: liveSessionRow.session_date ?? today.date_key,
+        startTime: liveSessionRow.start_time ?? null,
+        endTime: liveSessionRow.end_time ?? null,
+        status: "live" as const,
+        totalAppointments: Number(liveSessionRow.total_appointments ?? 0),
+        checkedInCount: Number(liveSessionRow.checked_in_count ?? 0),
+        waitingCount: Number(liveSessionRow.waiting_count ?? 0),
+        currentServingNumber:
+          liveSessionRow.current_serving_number == null
+            ? null
+            : Number(liveSessionRow.current_serving_number),
+        nextQueueNumber:
+          liveSessionRow.next_queue_number == null
+            ? null
+            : Number(liveSessionRow.next_queue_number),
+      }
+    : null;
+
+  const nextSession = nextSessionRow
+    ? {
+        id: String(nextSessionRow.session_id),
+        date: nextSessionRow.session_date,
+        startTime: nextSessionRow.start_time ?? null,
+        endTime: nextSessionRow.end_time ?? null,
+        status: nextSessionRow.session_date === today.date_key ? "today" : "upcoming",
+        medicalCenterName: nextSessionRow.medical_center_name ?? null,
+        appointmentCount: Number(nextSessionRow.appointment_count ?? 0),
+      }
+    : null;
 
   return {
-    doctor,
-    queue: queue
+    doctor: {
+      id: String(doctor.doctor_id),
+      userId: String(doctor.user_id),
+      name: doctor.name,
+      email: doctor.email,
+      profile_image: doctor.profile_image ?? null,
+      specialization: doctor.specialization ?? null,
+      license_number: doctor.license_number ?? null,
+      experience_years: doctor.experience_years ?? null,
+    },
+    today: {
+      date: today.date_key,
+      sessionCount: Number(today.session_count ?? 0),
+      appointmentCount: Number(today.appointment_count ?? 0),
+    },
+    upcoming: {
+      sessionCount: Number(upcoming.session_count ?? 0),
+      appointmentCount: Number(upcoming.appointment_count ?? 0),
+    },
+    liveSession,
+    nextSession,
+    queue: liveSession
       ? {
-          status: queue.status,
-          startedAt: queue.started_at,
-          waitingCount: 0,
+          id: liveSession.queueId,
+          status: "LIVE",
+          startedAt: null,
+          waitingCount: liveSession.waitingCount,
         }
       : null,
     currentPatient: null,
@@ -603,14 +875,20 @@ export const getDoctorQueueDashboardData = async (
     SELECT
       qp.*,
       u.name,
-      u.profile_image
+      u.profile_image,
+      b.time::text AS appointment_time
     FROM queue_patients qp
     JOIN users u ON qp.patient_id = u.id
+    LEFT JOIN bookings b
+      ON b.patient_id = qp.patient_id
+     AND b.session_id = $4
+     AND b.date = $2::date
+     AND b.doctor_id = $3
     WHERE qp.queue_id = $1
-    AND qp.status IN ('WAITING', 'WITH_DOCTOR')
+    AND qp.status IN ('WAITING', 'WITH_DOCTOR', 'COMPLETED', 'MISSED')
     ORDER BY qp.token_number ASC
     `,
-    [queue.id]
+    [queue.id, queue.shift_date, doctorId, queue.schedule_id ?? null]
   );
 
   const patients = patientsResult.rows;
@@ -640,14 +918,20 @@ export const getDoctorQueueDashboardData = async (
     SELECT
       qp.*,
       u.name,
-      u.profile_image
+      u.profile_image,
+      b.time::text AS appointment_time
     FROM queue_patients qp
     JOIN users u ON qp.patient_id = u.id
+    LEFT JOIN bookings b
+      ON b.patient_id = qp.patient_id
+     AND b.session_id = $4
+     AND b.date = $2::date
+     AND b.doctor_id = $3
     WHERE qp.queue_id = $1
     AND qp.status = 'WITH_DOCTOR'
     LIMIT 1
     `,
-    [queue.id]
+    [queue.id, queue.shift_date, doctorId, queue.schedule_id ?? null]
   );
 
   const currentPatient = currentPatientResult.rows.length > 0 ? currentPatientResult.rows[0] : null;

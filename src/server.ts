@@ -179,6 +179,9 @@ import {
 app.use("/api/admin", adminDashboardBannerRoutes);
 app.use("/api/patient", patientDashboardBannerRoutes);
 
+import patientPanelRoutes from "./routes/patient.panel.routes";
+app.use("/api/patient", patientPanelRoutes);
+
 import chatbotRoutes from "./routes/chatbot.routes";
 app.use("/api/patient", chatbotRoutes);
 

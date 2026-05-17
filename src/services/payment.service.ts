@@ -215,21 +215,16 @@ const PAYHERE_DEBUG_LOGS_ENABLED =
   process.env.NODE_ENV !== "production" && process.env.NODE_ENV !== "test" && process.env.VITEST !== "true";
 
 const getHostedCheckoutBaseUrl = () => {
-  if (env.publicAppUrl) {
-    return env.publicAppUrl;
+  const publicAppUrl = String(env.publicAppUrl || "").trim();
+  if (publicAppUrl) {
+    return normalizeHttpsUrl(publicAppUrl).replace(/\/$/, "");
   }
 
-  if (env.appWebUrl) {
-    return env.appWebUrl;
+  const appWebUrl = String(env.appWebUrl || "").trim();
+  if (appWebUrl) {
+    return normalizeHttpsUrl(appWebUrl).replace(/\/$/, "");
   }
 
-  if (env.payHereNotifyUrl) {
-    try {
-      return new URL(env.payHereNotifyUrl).origin;
-    } catch {
-      // Fall through to the app-level fallbacks.
-    }
-  }
   return null;
 };
 
@@ -918,15 +913,27 @@ export const createCheckoutSession = async (
     });
     logPayHereCheckoutPayload(fields);
     const hostedToken = buildHostedCheckoutToken(paymentId, orderId);
+    const hostedCheckoutUrl = `${hostedBaseUrl}/api/payments/payhere/hosted/${paymentId}?token=${encodeURIComponent(
+      hostedToken
+    )}`;
+
+    if (PAYHERE_DEBUG_LOGS_ENABLED) {
+      console.info("[payments] PayHere hosted checkout session", {
+        paymentId,
+        orderId,
+        hostedCheckoutUrl,
+        notify_url: fields.notify_url,
+        return_url: fields.return_url,
+        cancel_url: fields.cancel_url,
+      });
+    }
 
     return {
       orderId,
       paymentId,
       gateway: "payhere",
       checkoutUrl: gatewayConfig.checkoutUrl,
-      hostedUrl: `${hostedBaseUrl.replace(/\/$/, "")}/api/payments/payhere/hosted/${paymentId}?token=${encodeURIComponent(
-        hostedToken
-      )}`,
+      hostedUrl: hostedCheckoutUrl,
       hostedToken,
       gatewayOrderId,
       sandbox: gatewayConfig.mode !== "live",

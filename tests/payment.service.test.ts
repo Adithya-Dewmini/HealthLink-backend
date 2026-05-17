@@ -15,15 +15,14 @@ vi.mock("../src/config/env", () => ({
   env: {
     appTz: "Asia/Colombo",
     jwtSecret: "test-jwt-secret",
-    appWebUrl: undefined,
-    publicAppUrl: undefined,
+    appWebUrl: "https://adithyadewmini.com",
+    publicAppUrl: "https://adithyadewmini.com",
     payHereMerchantId: "1211147",
     payHereMerchantSecret: "sandbox-secret",
     payHereBaseUrl: "https://sandbox.payhere.lk/pay/checkout",
-    payHereReturnUrl: "https://health-link-web.vercel.app/payment/return",
-    payHereCancelUrl: "https://health-link-web.vercel.app/payment/cancel",
-    payHereNotifyUrl:
-      "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/notify",
+    payHereReturnUrl: "https://adithyadewmini.com/payment/return",
+    payHereCancelUrl: "https://adithyadewmini.com/payment/cancel",
+    payHereNotifyUrl: "https://adithyadewmini.com/api/payments/payhere/notify",
     paymentGatewayMode: "sandbox",
   },
 }));
@@ -114,9 +113,11 @@ beforeEach(() => {
   env.payHereMerchantId = "1211147";
   env.payHereMerchantSecret = "sandbox-secret";
   env.payHereBaseUrl = "https://sandbox.payhere.lk/pay/checkout";
-  env.payHereReturnUrl = "https://health-link-web.vercel.app/payment/return";
-  env.payHereCancelUrl = "https://health-link-web.vercel.app/payment/cancel";
-  env.payHereNotifyUrl = "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/notify";
+  env.appWebUrl = "https://adithyadewmini.com";
+  env.publicAppUrl = "https://adithyadewmini.com";
+  env.payHereReturnUrl = "https://adithyadewmini.com/payment/return";
+  env.payHereCancelUrl = "https://adithyadewmini.com/payment/cancel";
+  env.payHereNotifyUrl = "https://adithyadewmini.com/api/payments/payhere/notify";
   env.paymentGatewayMode = "sandbox";
 });
 
@@ -164,9 +165,7 @@ describe("payment service", () => {
     const session = await createCheckoutSession(88, 7);
 
     expect(session.paymentId).toBe(501);
-    expect(session.hostedUrl).toContain(
-      "https://healthlink-backend-5a75.onrender.com/api/payments/payhere/hosted/501"
-    );
+    expect(session.hostedUrl).toContain("https://adithyadewmini.com/api/payments/payhere/hosted/501");
     expect(session.fields.amount).toBe("2500.00");
     expect(session.fields.currency).toBe("LKR");
     expect(session.fields.hash).toBe(

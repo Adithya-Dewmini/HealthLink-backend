@@ -4,6 +4,7 @@ import {
   completeConsultationRecord,
   createConsultationRecord,
   getDoctorConsultationContext,
+  issuePrescriptionForConsultationRecord,
   searchMedicines,
   updateConsultationMedicines,
   updateConsultationRecord,
@@ -160,5 +161,23 @@ export const completeConsultation = async (
   } catch (error) {
     console.error("Complete consultation error:", error);
     return handleControllerError(res, error, "Failed to complete consultation");
+  }
+};
+
+export const issueConsultationPrescription = async (
+  req: AuthenticatedRequest<MedicineBody>,
+  res: Response
+) => {
+  try {
+    const userId = requireDoctorUser(req);
+    const result = await issuePrescriptionForConsultationRecord(
+      req.params.id,
+      userId,
+      req.body?.medicines
+    );
+    return res.json(result);
+  } catch (error) {
+    console.error("Issue consultation prescription error:", error);
+    return handleControllerError(res, error, "Failed to issue prescription");
   }
 };

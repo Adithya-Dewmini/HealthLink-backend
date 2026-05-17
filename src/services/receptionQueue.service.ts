@@ -26,7 +26,7 @@ const LATE_CHECK_IN_ACTION =
     ? "mark_missed"
     : "move_to_end";
 
-type AppError = Error & { statusCode?: number };
+type AppError = Error & { statusCode?: number; code?: string };
 
 type QueueRow = {
   id: number;
@@ -157,9 +157,10 @@ type ReceptionVisitStatus =
   | "missed"
   | "cancelled";
 
-const createStatusError = (message: string, statusCode: number) => {
+const createStatusError = (message: string, statusCode: number, code?: string) => {
   const error = new Error(message) as AppError;
   error.statusCode = statusCode;
+  error.code = code;
   return error;
 };
 
@@ -414,7 +415,7 @@ const ensureQueuePatientUserForeignKey = async (client: PoolClient) => {
 
 const ensureValidSessionId = (sessionId?: number | null) => {
   if (!Number.isFinite(Number(sessionId)) || Number(sessionId) <= 0) {
-    throw createStatusError("Valid session id is required", 400);
+    throw createStatusError("Valid session id is required", 400, "INVALID_SESSION_ID");
   }
 
   return Number(sessionId);
@@ -433,7 +434,7 @@ const ensureValidAppointmentStatus = (
     case BOOKING_STATUS.CANCELLED:
       return normalized;
     default:
-      throw createStatusError("Unsupported appointment status", 400);
+      throw createStatusError("Unsupported appointment status", 400, "UNSUPPORTED_APPOINTMENT_STATUS");
   }
 };
 
@@ -578,7 +579,7 @@ const loadQueuePayload = async (medicalCenterId: string, sessionId?: number | nu
 const requireQueue = async (medicalCenterId: string, sessionId?: number | null) => {
   const queue = await resolveQueue(medicalCenterId, sessionId);
   if (!queue) {
-    throw createStatusError("No queue found for this medical center session", 404);
+    throw createStatusError("No queue found for this medical center session", 404, "QUEUE_NOT_FOUND");
   }
   return queue;
 };
@@ -607,7 +608,7 @@ const resolveQueueByIdentifier = async (input: {
     return requireQueue(input.medicalCenterId, Number(input.sessionId));
   }
 
-  throw createStatusError("queueId or sessionId is required", 400);
+  throw createStatusError("queueId or sessionId is required", 400, "QUEUE_IDENTIFIER_REQUIRED");
 };
 
 const resolveQueueForUpdate = async (
@@ -661,10 +662,10 @@ const requireLiveQueueForUpdate = async (
 ) => {
   const queue = await resolveQueueForUpdate(client, input);
   if (!queue) {
-    throw createStatusError("Queue not started", 400);
+    throw createStatusError("Queue not started", 400, "QUEUE_NOT_STARTED");
   }
   if (!["LIVE", "PAUSED"].includes(normalizeQueueStatus(queue.status))) {
-    throw createStatusError("Queue is not active", 400);
+    throw createStatusError("Queue is not active", 400, "QUEUE_NOT_ACTIVE");
   }
   return queue;
 };
@@ -1658,7 +1659,7 @@ const requireReceptionBookingForUpdate = async (
 
   const booking = result.rows[0];
   if (!booking) {
-    throw createStatusError("Appointment not found", 404);
+    throw createStatusError("Appointment not found", 404, "APPOINTMENT_NOT_FOUND");
   }
 
   return booking;
@@ -1668,13 +1669,13 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
   const eventPayload = await withTransaction(async (client) => {
     const booking = await requireReceptionBookingForUpdate(client, medicalCenterId, bookingId);
     if (booking.status === BOOKING_STATUS.CANCELLED || booking.status === BOOKING_STATUS.COMPLETED) {
-      throw createStatusError("This appointment cannot be checked in", 400);
+      throw createStatusError("This appointment cannot be checked in", 400, "INVALID_APPOINTMENT_STATUS");
     }
     if (booking.status === BOOKING_STATUS.MISSED) {
-      throw createStatusError("Missed appointments cannot be checked in", 400);
+      throw createStatusError("Missed appointments cannot be checked in", 400, "MISSED_APPOINTMENT");
     }
     if (booking.status === BOOKING_STATUS.CONFIRMED || booking.status === BOOKING_STATUS.IN_PROGRESS) {
-      throw createStatusError("Patient is already checked in", 409);
+      throw createStatusError("Patient is already checked in.", 409, "ALREADY_CHECKED_IN");
     }
 
     const lateness = await client.query<{ late_minutes: number }>(
@@ -1797,7 +1798,7 @@ export const checkInReceptionVisit = async (medicalCenterId: string, bookingId: 
 
     if (existing.rows[0]?.id) {
       if (existing.rows[0].checked_in_at) {
-        throw createStatusError("Patient is already in the queue", 409);
+        throw createStatusError("Patient is already checked in.", 409, "ALREADY_CHECKED_IN");
       }
       const nextPosition = isLate ? await getEndPosition(client, queue.id) : existing.rows[0].token_number;
       await client.query(
@@ -2091,14 +2092,14 @@ export const sendReceptionVisitToQueue = async (medicalCenterId: string, booking
   const result = await withTransaction(async (client) => {
     const booking = await requireReceptionBookingForUpdate(client, medicalCenterId, bookingId);
     if (!booking.session_id) {
-      throw createStatusError("Visit is not linked to a clinic session", 400);
+      throw createStatusError("Visit is not linked to a clinic session", 400, "SESSION_REQUIRED");
     }
     if (
       booking.status === BOOKING_STATUS.CANCELLED ||
       booking.status === BOOKING_STATUS.COMPLETED ||
       booking.status === BOOKING_STATUS.MISSED
     ) {
-      throw createStatusError("This visit cannot be sent to queue", 400);
+      throw createStatusError("This visit cannot be sent to queue", 400, "INVALID_APPOINTMENT_STATUS");
     }
 
     const queue = await requireLiveQueueForUpdate(client, {
@@ -2125,7 +2126,7 @@ export const sendReceptionVisitToQueue = async (medicalCenterId: string, booking
 
     if (existing.rows[0]?.id) {
       if (["COMPLETED", "MISSED"].includes(normalizeQueueStatus(existing.rows[0].status))) {
-        throw createStatusError("Patient already has a closed queue record for this session", 409);
+        throw createStatusError("Patient already has a closed queue record for this session", 409, "QUEUE_ENTRY_CLOSED");
       }
 
       await client.query(
@@ -2393,7 +2394,7 @@ export const addReceptionWalkInToQueue = async (input: {
 }) => {
   const name = String(input.name || "").trim();
   if (!name) {
-    throw createStatusError("Patient name is required", 400);
+    throw createStatusError("Patient name is required", 400, "PATIENT_NAME_REQUIRED");
   }
   const priority = normalizePriority(input.priority);
 
@@ -2724,7 +2725,7 @@ export const startReceptionQueue = async (input: {
 
     const session = sessionResult.rows[0];
     if (!session) {
-      throw createStatusError("Today's clinic session was not found", 404);
+      throw createStatusError("Today's clinic session was not found", 404, "SESSION_NOT_FOUND");
     }
 
     const activeQueueResult = await client.query<QueueRow>(
@@ -2742,7 +2743,7 @@ export const startReceptionQueue = async (input: {
     );
 
     if (activeQueueResult.rows[0]?.id) {
-      throw createStatusError("This doctor already has an active queue today", 409);
+      throw createStatusError("This doctor already has an active queue today", 409, "SESSION_ALREADY_LIVE");
     }
 
     const endedQueueResult = await client.query<QueueRow>(
@@ -2760,7 +2761,7 @@ export const startReceptionQueue = async (input: {
     );
 
     if (endedQueueResult.rows[0]?.id) {
-      throw createStatusError("Today's queue has already ended for this session", 409);
+      throw createStatusError("Today's queue has already ended for this session", 409, "SESSION_ALREADY_ENDED");
     }
 
     const queueResult = await client.query<{ id: number }>(

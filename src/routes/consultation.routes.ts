@@ -6,6 +6,7 @@ import {
   createConsultation,
   getDoctorConsultation,
   getMedicines,
+  issueConsultationPrescription,
   saveConsultationMedicines,
   updateConsultation,
 } from "../controllers/consultation.controller";
@@ -26,6 +27,13 @@ router.post("/consultations", authenticateToken, requireVerifiedDoctor, createCo
 router.post("/consultations/:id/medicines", authenticateToken, requireVerifiedDoctor, saveConsultationMedicines);
 
 router.patch("/consultations/:id", authenticateToken, requireVerifiedDoctor, updateConsultation);
+
+router.post(
+  "/consultations/:id/issue-prescription",
+  authenticateToken,
+  requireVerifiedDoctor,
+  issueConsultationPrescription
+);
 
 router.post("/consultations/:id/complete", authenticateToken, requireVerifiedDoctor, completeConsultation);
 
