@@ -3,10 +3,12 @@ import type { AuthenticatedRequest } from "../types/auth";
 import {
   createDashboardBanner,
   deleteDashboardBanner,
+  listAppDashboardBanners,
   listAdminDashboardBanners,
   listPatientDashboardBanners,
   updateDashboardBanner,
   uploadDashboardBannerImage,
+  type DashboardBannerAudience,
   type DashboardBannerInput,
 } from "../services/dashboardBanner.service";
 
@@ -37,12 +39,45 @@ const asDateInput = (value: unknown) => {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 };
 
+const allowedAudiences = new Set<DashboardBannerAudience>([
+  "patient",
+  "pharmacy",
+  "doctor",
+  "receptionist",
+  "admin",
+]);
+
+const asAudience = (value: unknown): DashboardBannerAudience => {
+  const normalized = asTrimmedString(value)?.toLowerCase() as DashboardBannerAudience | undefined;
+  return normalized && allowedAudiences.has(normalized) ? normalized : "patient";
+};
+
+const getDefaultTargetScreen = (audience: DashboardBannerAudience) => {
+  switch (audience) {
+    case "pharmacy":
+      return "PharmacyDashboard";
+    case "doctor":
+      return "DoctorDashboard";
+    case "receptionist":
+      return "ReceptionistHome";
+    case "admin":
+      return "Dashboard";
+    case "patient":
+    default:
+      return "PatientDashboard";
+  }
+};
+
 const parseBannerInput = (body: Record<string, unknown>): DashboardBannerInput => ({
+  audience: asAudience(body.audience ?? body.panel),
   title: asTrimmedString(body.title),
   subtitle: asTrimmedString(body.subtitle),
   targetType: asTrimmedString(body.targetType) ?? asTrimmedString(body.target_type) ?? "none",
   targetId: asTrimmedString(body.targetId) ?? asTrimmedString(body.target_id),
-  targetScreen: asTrimmedString(body.targetScreen) ?? asTrimmedString(body.target_screen),
+  targetScreen:
+    asTrimmedString(body.targetScreen) ??
+    asTrimmedString(body.target_screen) ??
+    getDefaultTargetScreen(asAudience(body.audience ?? body.panel)),
   isActive: asBoolean(body.isActive ?? body.is_active, true),
   sortOrder: asInteger(body.sortOrder ?? body.sort_order, 0),
   startDate: asDateInput(body.startDate ?? body.start_date),
@@ -83,6 +118,37 @@ export const getPatientDashboardBannersController = async (_req: AuthenticatedRe
     });
   } catch (error) {
     console.error("GET PATIENT DASHBOARD BANNERS ERROR:", error);
+    return res.status(500).json({ message: "Unable to load dashboard banners" });
+  }
+};
+
+export const getAppDashboardBannersController = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const audience = asAudience(req.query.audience);
+    const targetScreen =
+      asTrimmedString(req.query.screen) ??
+      asTrimmedString(req.query.targetScreen) ??
+      getDefaultTargetScreen(audience);
+
+    const items = await listAppDashboardBanners({
+      audience,
+      targetScreen,
+    });
+
+    return res.json({
+      items: items.map((item) => ({
+        id: item.id,
+        audience: item.audience,
+        title: item.title,
+        subtitle: item.subtitle,
+        imageUrl: item.imageUrl,
+        targetType: item.targetType,
+        targetId: item.targetId,
+        targetScreen: item.targetScreen,
+      })),
+    });
+  } catch (error) {
+    console.error("GET APP DASHBOARD BANNERS ERROR:", error);
     return res.status(500).json({ message: "Unable to load dashboard banners" });
   }
 };

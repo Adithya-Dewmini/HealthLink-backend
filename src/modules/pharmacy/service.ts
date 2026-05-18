@@ -386,6 +386,7 @@ const getInventoryRowByMedicineId = async (
 
 const mapMedicineInventoryRow = (row: DbRecord) => ({
   id: Number(row.id),
+  pharmacy_id: row.pharmacy_id === null || row.pharmacy_id === undefined ? null : Number(row.pharmacy_id),
   name: row.name,
   category_id: row.category_id === null || row.category_id === undefined ? null : Number(row.category_id),
   category_name: row.category_name,
@@ -401,6 +402,18 @@ const mapMedicineInventoryRow = (row: DbRecord) => ({
     row.quantity === null || row.quantity === undefined ? null : Number(row.quantity),
   price: row.price === null || row.price === undefined ? null : Number(row.price),
   expiry_date: row.expiry_date,
+  marketplace_product_id:
+    row.marketplace_product_id === null || row.marketplace_product_id === undefined
+      ? null
+      : Number(row.marketplace_product_id),
+  marketplace_discount_price:
+    row.marketplace_discount_price === null || row.marketplace_discount_price === undefined
+      ? null
+      : Number(row.marketplace_discount_price),
+  marketplace_is_active:
+    row.marketplace_is_active === null || row.marketplace_is_active === undefined
+      ? null
+      : Boolean(row.marketplace_is_active),
 });
 
 const fetchInventoryMedicineById = async (
@@ -413,6 +426,7 @@ const fetchInventoryMedicineById = async (
     `
       SELECT
         m.id,
+        inv.${quoteIdent(inventory.pharmacyCol)} AS pharmacy_id,
         m.name,
         m.category_id,
         c.name AS category_name,
@@ -426,12 +440,18 @@ const fetchInventoryMedicineById = async (
         m.dosage_form,
         inv.${quoteIdent(inventory.stockCol)} AS quantity,
         ${inventory.priceCol ? `inv.${quoteIdent(inventory.priceCol)}` : "m.price"} AS price,
-        m.expiry_date
+        m.expiry_date,
+        mp.id AS marketplace_product_id,
+        mp.discount_price AS marketplace_discount_price,
+        mp.is_active AS marketplace_is_active
       FROM inventory inv
       JOIN medicines m
         ON m.id = inv.${quoteIdent(inventory.medicineCol)}
       LEFT JOIN categories c ON c.id = m.category_id
       LEFT JOIN brands b ON b.id = m.brand_id
+      LEFT JOIN marketplace_products mp
+        ON mp.pharmacy_id = inv.${quoteIdent(inventory.pharmacyCol)}
+       AND mp.inventory_item_id = inv.${quoteIdent(inventory.medicineCol)}
       WHERE inv.${quoteIdent(inventory.pharmacyCol)} = $1
         AND inv.${quoteIdent(inventory.medicineCol)} = $2
       LIMIT 1
@@ -876,6 +896,7 @@ export const fetchInventory = async (pharmacyId: number | string) => {
       `
         SELECT
           m.id,
+          inv.${quoteIdent(inventorySchema.pharmacyCol)} AS pharmacy_id,
           m.name,
           m.category_id,
           c.name AS category_name,
@@ -889,12 +910,18 @@ export const fetchInventory = async (pharmacyId: number | string) => {
           m.dosage_form,
           inv.${quoteIdent(inventorySchema.stockCol)} AS quantity,
           ${inventorySchema.priceCol ? `inv.${quoteIdent(inventorySchema.priceCol)}` : "m.price"} AS price,
-          m.expiry_date
+          m.expiry_date,
+          mp.id AS marketplace_product_id,
+          mp.discount_price AS marketplace_discount_price,
+          mp.is_active AS marketplace_is_active
         FROM inventory inv
         JOIN medicines m
           ON m.id = inv.${quoteIdent(inventorySchema.medicineCol)}
         LEFT JOIN categories c ON c.id = m.category_id
         LEFT JOIN brands b ON b.id = m.brand_id
+        LEFT JOIN marketplace_products mp
+          ON mp.pharmacy_id = inv.${quoteIdent(inventorySchema.pharmacyCol)}
+         AND mp.inventory_item_id = inv.${quoteIdent(inventorySchema.medicineCol)}
         WHERE inv.${quoteIdent(inventorySchema.pharmacyCol)} = $1
         ORDER BY m.name ASC
       `,
@@ -905,6 +932,7 @@ export const fetchInventory = async (pharmacyId: number | string) => {
   });
 
   return {
+    pharmacyId: Number(pharmacyId),
     medicines: rows.map(mapMedicineInventoryRow),
   };
 };

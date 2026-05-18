@@ -174,10 +174,12 @@ app.use("/api/admin", adminMonitorRoutes);
 
 import {
   adminDashboardBannerRoutes,
+  appDashboardBannerRoutes,
   patientDashboardBannerRoutes,
 } from "./routes/dashboardBanner.routes";
 app.use("/api/admin", adminDashboardBannerRoutes);
 app.use("/api/patient", patientDashboardBannerRoutes);
+app.use("/api/app", appDashboardBannerRoutes);
 
 import patientPanelRoutes from "./routes/patient.panel.routes";
 app.use("/api/patient", patientPanelRoutes);

@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import type { AuthenticatedRequest } from "../../types/auth";
 import { verifyPrescriptionToken } from "../../services/prescription.service";
 import { createAuditLog, getAuditRequestContext } from "../../services/audit.service";
+import { emitInventoryUpdated } from "../../services/realtime.service";
 import { assertVerifiedPharmacyForUser } from "../../services/verification.service";
 import { isHttpError } from "./errors";
 import {
@@ -289,6 +290,11 @@ export const createMedicineController = async (req: Request, res: Response) => {
         name: payload.name,
       },
     });
+    emitInventoryUpdated({
+      pharmacyId: pharmacy.id,
+      medicineId: data?.medicine?.id ?? null,
+      metadata: { kind: "create" },
+    });
     return res.status(201).json(data);
   } catch (error) {
     return handleError(res, error, "Failed to save medicine");
@@ -311,6 +317,11 @@ export const updateMedicineController = async (req: Request, res: Response) => {
       metadata: {
         pharmacyId: pharmacy.id,
       },
+    });
+    emitInventoryUpdated({
+      pharmacyId: pharmacy.id,
+      medicineId: payload.id,
+      metadata: { kind: "update" },
     });
     return res.json(data);
   } catch (error) {
@@ -337,6 +348,14 @@ export const restockMedicineController = async (req: Request, res: Response) => 
         quantity: payload.quantity,
       },
     });
+    emitInventoryUpdated({
+      pharmacyId: pharmacy.id,
+      medicineId: payload.id,
+      metadata: {
+        kind: "restock",
+        quantity: payload.quantity,
+      },
+    });
     return res.json(data);
   } catch (error) {
     return handleError(res, error, "Failed to restock medicine");
@@ -359,6 +378,11 @@ export const deleteMedicineController = async (req: Request, res: Response) => {
       metadata: {
         pharmacyId: pharmacy.id,
       },
+    });
+    emitInventoryUpdated({
+      pharmacyId: pharmacy.id,
+      medicineId: id,
+      metadata: { kind: "delete" },
     });
     return res.json(data);
   } catch (error) {

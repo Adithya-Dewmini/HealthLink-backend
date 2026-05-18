@@ -9,11 +9,23 @@ export type DashboardBannerTargetType =
   | "medical_center"
   | "pharmacy"
   | "doctor"
+  | "medicine"
+  | "inventory"
+  | "order"
+  | "external_url"
   | "prescription_upload"
   | "appointments"
   | string;
 
+export type DashboardBannerAudience =
+  | "patient"
+  | "pharmacy"
+  | "doctor"
+  | "receptionist"
+  | "admin";
+
 export type DashboardBannerInput = {
+  audience: DashboardBannerAudience;
   title: string | null;
   subtitle: string | null;
   targetType: DashboardBannerTargetType | null;
@@ -27,6 +39,7 @@ export type DashboardBannerInput = {
 
 export type DashboardBanner = {
   id: string;
+  audience: DashboardBannerAudience;
   title: string | null;
   subtitle: string | null;
   imageUrl: string;
@@ -43,6 +56,7 @@ export type DashboardBanner = {
 
 type DashboardBannerRow = {
   id: string;
+  audience: DashboardBannerAudience;
   title: string | null;
   subtitle: string | null;
   image_url: string;
@@ -68,6 +82,7 @@ const toIsoString = (value: Date | string | null) => {
 
 const mapBanner = (row: DashboardBannerRow): DashboardBanner => ({
   id: row.id,
+  audience: row.audience,
   title: row.title,
   subtitle: row.subtitle,
   imageUrl: row.image_url,
@@ -135,7 +150,7 @@ export const uploadDashboardBannerImage = async (_req: Request, file: UploadedFi
 export const listAdminDashboardBanners = async () => {
   const result = await pool.query<DashboardBannerRow>(
     `
-    SELECT id, title, subtitle, image_url, target_type, target_id, target_screen,
+    SELECT id, audience, title, subtitle, image_url, target_type, target_id, target_screen,
            is_active, sort_order, start_date, end_date, created_at, updated_at
     FROM dashboard_banners
     ORDER BY sort_order ASC, created_at DESC
@@ -145,34 +160,53 @@ export const listAdminDashboardBanners = async () => {
   return result.rows.map(mapBanner);
 };
 
-export const listPatientDashboardBanners = async () => {
+export const listAppDashboardBanners = async (input: {
+  audience: DashboardBannerAudience;
+  targetScreen?: string | null;
+}) => {
+  const targetScreen = String(input.targetScreen || "").trim();
   const result = await pool.query<DashboardBannerRow>(
     `
-    SELECT id, title, subtitle, image_url, target_type, target_id, target_screen,
+    SELECT id, audience, title, subtitle, image_url, target_type, target_id, target_screen,
            is_active, sort_order, start_date, end_date, created_at, updated_at
     FROM dashboard_banners
-    WHERE is_active = TRUE
+    WHERE audience = $1
+      AND is_active = TRUE
       AND (start_date IS NULL OR start_date <= NOW())
       AND (end_date IS NULL OR end_date >= NOW())
+      AND (
+        $2 = ''
+        OR target_screen IS NULL
+        OR target_screen = ''
+        OR LOWER(target_screen) = LOWER($2)
+      )
     ORDER BY sort_order ASC, created_at DESC
-    `
+    `,
+    [input.audience, targetScreen]
   );
 
   return result.rows.map(mapBanner);
 };
+
+export const listPatientDashboardBanners = async () =>
+  listAppDashboardBanners({
+    audience: "patient",
+    targetScreen: "PatientDashboard",
+  });
 
 export const createDashboardBanner = async (input: DashboardBannerInput, imageUrl: string, createdBy: number | null) => {
   const result = await pool.query<DashboardBannerRow>(
     `
     INSERT INTO dashboard_banners (
-      title, subtitle, image_url, target_type, target_id, target_screen,
+      audience, title, subtitle, image_url, target_type, target_id, target_screen,
       is_active, sort_order, start_date, end_date, created_by
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz, $10::timestamptz, NULL)
-    RETURNING id, title, subtitle, image_url, target_type, target_id, target_screen,
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11::timestamptz, NULL)
+    RETURNING id, audience, title, subtitle, image_url, target_type, target_id, target_screen,
               is_active, sort_order, start_date, end_date, created_at, updated_at
     `,
     [
+      input.audience,
       input.title,
       input.subtitle,
       imageUrl,
@@ -194,23 +228,25 @@ export const updateDashboardBanner = async (id: string, input: DashboardBannerIn
   const result = await pool.query<DashboardBannerRow>(
     `
     UPDATE dashboard_banners
-    SET title = $2,
-        subtitle = $3,
-        image_url = COALESCE($4, image_url),
-        target_type = $5,
-        target_id = $6,
-        target_screen = $7,
-        is_active = $8,
-        sort_order = $9,
-        start_date = $10::timestamptz,
-        end_date = $11::timestamptz,
+    SET audience = $2,
+        title = $3,
+        subtitle = $4,
+        image_url = COALESCE($5, image_url),
+        target_type = $6,
+        target_id = $7,
+        target_screen = $8,
+        is_active = $9,
+        sort_order = $10,
+        start_date = $11::timestamptz,
+        end_date = $12::timestamptz,
         updated_at = NOW()
     WHERE id = $1::uuid
-    RETURNING id, title, subtitle, image_url, target_type, target_id, target_screen,
+    RETURNING id, audience, title, subtitle, image_url, target_type, target_id, target_screen,
               is_active, sort_order, start_date, end_date, created_at, updated_at
     `,
     [
       id,
+      input.audience,
       input.title,
       input.subtitle,
       imageUrl ?? null,

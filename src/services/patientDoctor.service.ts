@@ -282,7 +282,16 @@ export const getDoctorQueueStatusForPatient = async (
         AND s.medical_center_id = $2
         AND s.date = ${APP_DATE_SQL}
         AND s.is_active = TRUE
-      ORDER BY s.start_time ASC
+      ORDER BY
+        CASE
+          WHEN s.end_time >= ${APP_TIME_SQL} THEN 0
+          ELSE 1
+        END ASC,
+        CASE
+          WHEN s.end_time >= ${APP_TIME_SQL} THEN s.start_time
+          ELSE NULL
+        END ASC NULLS LAST,
+        s.start_time DESC
       LIMIT 1
       `,
       [doctorId, clinicId]

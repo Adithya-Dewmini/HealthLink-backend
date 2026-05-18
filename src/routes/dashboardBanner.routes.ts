@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   createDashboardBannerController,
   deleteDashboardBannerController,
+  getAppDashboardBannersController,
   getAdminDashboardBannersController,
   getPatientDashboardBannersController,
   updateDashboardBannerController,
@@ -30,3 +31,8 @@ export const patientDashboardBannerRoutes = Router();
 
 patientDashboardBannerRoutes.use(authenticateToken);
 patientDashboardBannerRoutes.get("/dashboard-banners", getPatientDashboardBannersController);
+
+export const appDashboardBannerRoutes = Router();
+
+appDashboardBannerRoutes.use(authenticateToken);
+appDashboardBannerRoutes.get("/banners", getAppDashboardBannersController);
