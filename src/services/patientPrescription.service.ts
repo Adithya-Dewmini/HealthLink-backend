@@ -94,6 +94,7 @@ export const listPatientPrescriptions = async (patientId: number, latest: boolea
       patientId: rows[0].patient_id ?? null,
       doctorId: rows[0].doctor_id ?? null,
       medicalCenterId: rows[0].medical_center_id ?? null,
+      issuedAt: rows[0].issuedAt ?? rows[0].createdAt ?? null,
       qrCode: rows[0].qrToken ?? null,
       isDispensed: Boolean(rows[0].dispensedAt),
     });

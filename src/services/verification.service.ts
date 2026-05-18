@@ -824,6 +824,24 @@ export const assertVerifiedDoctorByUserId = async (userId: number) => {
   await assertVerifiedDoctorByProfileId(result.rows[0].id);
 };
 
+export const assertVerifiedDoctorProfileOnlyByUserId = async (userId: number) => {
+  const result = await pool.query<{ id: number }>(
+    `
+    SELECT id
+    FROM doctors
+    WHERE user_id = $1
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  if (result.rows.length === 0) {
+    throw createStatusError("Doctor profile not found", 404);
+  }
+
+  await assertVerifiedDoctorProfileOnly(result.rows[0].id);
+};
+
 export const assertVerifiedPharmacyForUser = async (userId: number) => {
   const result = await pool.query<{ verification_status: string }>(
     `

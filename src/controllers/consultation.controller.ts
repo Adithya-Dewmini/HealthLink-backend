@@ -21,6 +21,9 @@ type ConsultationBody = {
 
 type MedicineBody = {
   medicines?: any[];
+  symptoms?: string | null;
+  diagnosis?: string | null;
+  notes?: string | null;
 };
 
 type HttpError = Error & { statusCode?: number; conflicts?: unknown; code?: string };
@@ -159,7 +162,12 @@ export const completeConsultation = async (
 ) => {
   try {
     const userId = requireDoctorUser(req);
-    const result = await completeConsultationRecord(req.params.id, userId, req.body?.medicines);
+    const result = await completeConsultationRecord(req.params.id, userId, {
+      medicines: req.body?.medicines,
+      symptoms: req.body?.symptoms ?? null,
+      diagnosis: req.body?.diagnosis ?? null,
+      notes: req.body?.notes ?? null,
+    });
     return res.json(result);
   } catch (error) {
     console.error("Complete consultation error:", error);
@@ -173,11 +181,12 @@ export const issueConsultationPrescription = async (
 ) => {
   try {
     const userId = requireDoctorUser(req);
-    const result = await issuePrescriptionForConsultationRecord(
-      req.params.id,
-      userId,
-      req.body?.medicines
-    );
+    const result = await issuePrescriptionForConsultationRecord(req.params.id, userId, {
+      medicines: req.body?.medicines,
+      symptoms: req.body?.symptoms ?? null,
+      diagnosis: req.body?.diagnosis ?? null,
+      notes: req.body?.notes ?? null,
+    });
     return res.json(result);
   } catch (error) {
     console.error("Issue consultation prescription error:", error);

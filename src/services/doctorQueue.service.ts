@@ -4,6 +4,16 @@ import { env } from "../config/env";
 const APP_TZ = env.appTz;
 const APP_TIME_SQL = `(now() AT TIME ZONE '${APP_TZ}')::time`;
 const APP_DATE_SQL = `(now() AT TIME ZONE '${APP_TZ}')::date`;
+const APPROVED_CENTER_SQL = `
+  (
+    LOWER(COALESCE(mc.verification_status, 'pending')) = 'approved'
+    OR (
+      LOWER(COALESCE(mc.verification_status, 'pending')) = 'pending'
+      AND LOWER(COALESCE(mc.status, '')) = 'approved'
+    )
+  )
+  AND LOWER(COALESCE(mc.status, 'active')) IN ('active', 'approved')
+`;
 
 type DoctorIdRow = { id: number };
 type QueueRow = {
@@ -105,10 +115,12 @@ export const resolveStartableSchedule = async (
   if (requestedScheduleId) {
     const requestedSchedule = await db.query<StartableScheduleRow>(
       `
-      SELECT id, medical_center_id, start_time::text AS start_time, end_time::text AS end_time
-      FROM medical_center_doctor_schedule
-      WHERE id = $1
-        AND doctor_profile_id = $2
+      SELECT s.id, s.medical_center_id, s.start_time::text AS start_time, s.end_time::text AS end_time
+      FROM medical_center_doctor_schedule s
+      JOIN medical_centers mc ON mc.id = s.medical_center_id
+      WHERE s.id = $1
+        AND s.doctor_profile_id = $2
+        AND ${APPROVED_CENTER_SQL}
         AND date = ${APP_DATE_SQL}
         AND is_active = TRUE
       LIMIT 1
@@ -121,15 +133,17 @@ export const resolveStartableSchedule = async (
 
   const activeOrUpcomingSchedule = await db.query<StartableScheduleRow>(
     `
-    SELECT id, medical_center_id, start_time::text AS start_time, end_time::text AS end_time
-    FROM medical_center_doctor_schedule
-    WHERE doctor_profile_id = $1
-      AND date = ${APP_DATE_SQL}
-      AND is_active = TRUE
-      AND end_time >= ${APP_TIME_SQL}
+    SELECT s.id, s.medical_center_id, s.start_time::text AS start_time, s.end_time::text AS end_time
+    FROM medical_center_doctor_schedule s
+    JOIN medical_centers mc ON mc.id = s.medical_center_id
+    WHERE s.doctor_profile_id = $1
+      AND s.date = ${APP_DATE_SQL}
+      AND s.is_active = TRUE
+      AND s.end_time >= ${APP_TIME_SQL}
+      AND ${APPROVED_CENTER_SQL}
     ORDER BY
-      CASE WHEN start_time <= ${APP_TIME_SQL} AND end_time >= ${APP_TIME_SQL} THEN 0 ELSE 1 END,
-      start_time ASC
+      CASE WHEN s.start_time <= ${APP_TIME_SQL} AND s.end_time >= ${APP_TIME_SQL} THEN 0 ELSE 1 END,
+      s.start_time ASC
     LIMIT 1
     `,
     [doctorId]

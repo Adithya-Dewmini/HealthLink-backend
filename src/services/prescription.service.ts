@@ -5,6 +5,7 @@ import type { PoolClient } from "pg";
 
 const QR_SECRET = env.jwtSecret;
 const PRESCRIPTION_QR_TOKEN_TTL = "365d";
+export const PRESCRIPTION_VALIDITY_DAYS = 7;
 
 type HttpError = Error & { statusCode?: number };
 type Queryable = Pick<typeof pool, "query"> | PoolClient;
@@ -35,6 +36,49 @@ const createStatusError = (message: string, statusCode: number) => {
   const error = new Error(message) as HttpError;
   error.statusCode = statusCode;
   return error;
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const getStartOfDay = (value: string | Date) => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+};
+
+export const getPrescriptionValidityExpiresAt = (issuedAt?: string | Date | null) => {
+  if (!issuedAt) return null;
+
+  const issuedDay = getStartOfDay(issuedAt);
+  if (!issuedDay) return null;
+
+  return new Date(
+    issuedDay.getTime() + (PRESCRIPTION_VALIDITY_DAYS * DAY_MS) - 1
+  ).toISOString();
+};
+
+export const isPrescriptionExpired = (issuedAt?: string | Date | null) => {
+  const expiresAt = getPrescriptionValidityExpiresAt(issuedAt);
+  if (!expiresAt) return false;
+  return Date.now() > new Date(expiresAt).getTime();
+};
+
+export const assertPrescriptionIsValidForUse = (
+  issuedAt?: string | Date | null,
+  statusCode = 410
+) => {
+  if (!isPrescriptionExpired(issuedAt)) {
+    return;
+  }
+
+  throw createStatusError(
+    `Prescription has expired. Prescriptions are valid for ${PRESCRIPTION_VALIDITY_DAYS} days from issue date.`,
+    statusCode
+  );
 };
 
 export const createPrescriptionQrToken = (payload: PrescriptionQrTokenPayload) =>
@@ -90,38 +134,62 @@ const tokenMatchesPrescriptionContext = (
   );
 };
 
-export const getPrescriptionQrMetadata = (qrCode?: string | null) => {
+export const getPrescriptionQrMetadata = (
+  qrCode?: string | null,
+  options?: {
+    issuedAt?: string | Date | null;
+    isDispensed?: boolean;
+  }
+) => {
+  const validityExpiresAt = getPrescriptionValidityExpiresAt(options?.issuedAt);
+
+  if (options?.isDispensed) {
+    return {
+      qrStatus: "unavailable" as const,
+      expiresAt: validityExpiresAt,
+      isUsable: false,
+    };
+  }
+
+  if (isPrescriptionExpired(options?.issuedAt)) {
+    return {
+      qrStatus: "expired" as const,
+      expiresAt: validityExpiresAt,
+      isUsable: false,
+    };
+  }
+
   if (!qrCode) {
     return {
       qrStatus: "unavailable" as const,
-      expiresAt: null as string | null,
+      expiresAt: validityExpiresAt,
       isUsable: false,
     };
   }
 
   try {
     const decoded = jwt.decode(qrCode) as { exp?: number } | null;
-    const expiresAt =
+    const tokenExpiresAt =
       typeof decoded?.exp === "number" ? new Date(decoded.exp * 1000).toISOString() : null;
 
-    if (!expiresAt) {
+    if (!tokenExpiresAt) {
       return {
         qrStatus: "active" as const,
-        expiresAt: null,
+        expiresAt: validityExpiresAt,
         isUsable: true,
       };
     }
 
-    const isExpired = new Date(expiresAt).getTime() <= Date.now();
+    const isExpired = new Date(tokenExpiresAt).getTime() <= Date.now();
     return {
       qrStatus: isExpired ? ("expired" as const) : ("active" as const),
-      expiresAt,
+      expiresAt: validityExpiresAt ?? tokenExpiresAt,
       isUsable: !isExpired,
     };
   } catch {
     return {
       qrStatus: "invalid" as const,
-      expiresAt: null,
+      expiresAt: validityExpiresAt,
       isUsable: false,
     };
   }
@@ -135,6 +203,7 @@ export const ensurePrescriptionQrToken = async (
     patientId?: number | null;
     doctorId?: number | null;
     medicalCenterId?: string | null;
+    issuedAt?: string | Date | null;
     qrCode?: string | null;
     isDispensed?: boolean;
   }
@@ -143,13 +212,27 @@ export const ensurePrescriptionQrToken = async (
     return {
       qrToken: null,
       refreshed: false,
-      ...getPrescriptionQrMetadata(null),
+      ...getPrescriptionQrMetadata(null, {
+        issuedAt: input.issuedAt,
+        isDispensed: input.isDispensed,
+      }),
     };
   }
 
-  const currentMeta = getPrescriptionQrMetadata(input.qrCode);
+  const currentMeta = getPrescriptionQrMetadata(input.qrCode, {
+    issuedAt: input.issuedAt,
+    isDispensed: input.isDispensed,
+  });
   const decoded = decodePrescriptionQrToken(input.qrCode);
   const hasExpectedContext = tokenMatchesPrescriptionContext(decoded, input);
+
+  if (currentMeta.qrStatus === "expired") {
+    return {
+      qrToken: input.qrCode ?? null,
+      refreshed: false,
+      ...currentMeta,
+    };
+  }
 
   if (input.qrCode && currentMeta.isUsable && hasExpectedContext) {
     return {
@@ -175,7 +258,10 @@ export const ensurePrescriptionQrToken = async (
   return {
     qrToken: nextToken,
     refreshed: true,
-    ...getPrescriptionQrMetadata(nextToken),
+    ...getPrescriptionQrMetadata(nextToken, {
+      issuedAt: input.issuedAt,
+      isDispensed: input.isDispensed,
+    }),
   };
 };
 
@@ -207,6 +293,8 @@ export const verifyPrescriptionToken = async (token: string) => {
     medical_center_id: string | null;
     qr_code: string | null;
     dispensed_at: string | null;
+    issued_at: string | null;
+    consultation_created_at: string | null;
   }>(
     `
       SELECT
@@ -216,7 +304,9 @@ export const verifyPrescriptionToken = async (token: string) => {
         c.doctor_id,
         COALESCE(p.medical_center_id, c.medical_center_id) AS medical_center_id,
         p.qr_code,
-        p.dispensed_at
+        p.dispensed_at,
+        p.issued_at,
+        c.created_at AS consultation_created_at
       FROM prescriptions p
       LEFT JOIN consultations c
         ON c.id = p.consultation_id
@@ -246,6 +336,10 @@ export const verifyPrescriptionToken = async (token: string) => {
   if (!matchesContext) {
     throw createStatusError("Prescription QR does not match the consultation", 401);
   }
+
+  assertPrescriptionIsValidForUse(
+    prescription.issued_at ?? prescription.consultation_created_at ?? null
+  );
 
   return {
     prescriptionId: prescription.prescription_id,
@@ -342,6 +436,7 @@ export const getPrescriptionDetails = async (prescriptionId: string, user?: { id
     patientId: row.patient_id ?? null,
     doctorId: row.doctor_id ?? null,
     medicalCenterId: row.medical_center_id ?? null,
+    issuedAt: row.issued_at ?? row.consultation_created_at ?? row.created_at ?? null,
     qrCode: row.qr_code ?? null,
     isDispensed: Boolean(row.dispensed_at),
   });
@@ -382,6 +477,33 @@ export const getPrescriptionDetails = async (prescriptionId: string, user?: { id
 export const dispensePrescription = async (prescriptionId: string, pharmacistUserId: number) => {
   const result = await pool.query(
     `
+    SELECT
+      p.id,
+      p.dispensed_at,
+      p.issued_at,
+      c.created_at AS consultation_created_at
+    FROM prescriptions p
+    LEFT JOIN consultations c
+      ON c.id = p.consultation_id
+    WHERE p.id = $1
+    LIMIT 1
+    `,
+    [prescriptionId]
+  );
+
+  if (result.rows.length === 0) {
+    throw createStatusError("Prescription not found", 404);
+  }
+
+  const row = result.rows[0];
+  if (row.dispensed_at) {
+    throw createStatusError("Prescription has already been dispensed", 409);
+  }
+
+  assertPrescriptionIsValidForUse(row.issued_at ?? row.consultation_created_at ?? null);
+
+  const updateResult = await pool.query(
+    `
     UPDATE prescriptions
     SET dispensed_at = NOW(), dispensed_by = $2
     WHERE id = $1
@@ -390,9 +512,5 @@ export const dispensePrescription = async (prescriptionId: string, pharmacistUse
     [prescriptionId, pharmacistUserId]
   );
 
-  if (result.rows.length === 0) {
-    throw createStatusError("Prescription not found", 404);
-  }
-
-  return result.rows[0];
+  return updateResult.rows[0];
 };

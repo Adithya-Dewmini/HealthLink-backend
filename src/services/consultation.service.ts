@@ -12,6 +12,7 @@ import {
   logRealtimeEmit,
 } from "./realtime.service";
 import { createPrescriptionQrToken, ensurePrescriptionQrToken } from "./prescription.service";
+import { assertVerifiedClinic } from "./verification.service";
 
 const doctorRoom = (doctorId: number | string) => `doctor-${doctorId}`;
 const receptionRoom = "reception";
@@ -202,6 +203,10 @@ const ensureQueuePatientContext = async (
 export const getDoctorConsultationContext = async (queueId: number, doctorUserId: number) => {
   const queuePatientContext = await ensureQueuePatientContext(pool, { queueId, doctorUserId });
 
+  if (queuePatientContext.medical_center_id) {
+    await assertVerifiedClinic(String(queuePatientContext.medical_center_id));
+  }
+
   const currentPatientResult = await pool.query(
     `
     SELECT
@@ -383,6 +388,10 @@ export const createConsultationRecord = async (options: {
       doctorUserId: userId,
     });
 
+    if (queueContext.medical_center_id) {
+      await assertVerifiedClinic(String(queueContext.medical_center_id));
+    }
+
     if (queueContext.consultation_id) {
       const existingResult = await pool.query(
         `
@@ -475,7 +484,7 @@ export const updateConsultationRecord = async (options: {
   const { consultationId, symptoms, diagnosis, notes, medicines, userId } = options;
 
   if (medicines !== undefined) {
-    const validationError = validateMedicines(medicines, true);
+    const validationError = validateMedicines(medicines, false);
     if (validationError) {
       throw createStatusError(validationError, 400, "PRESCRIPTION_REQUIRED_FIELDS");
     }
@@ -510,11 +519,14 @@ export const updateConsultationRecord = async (options: {
   }
 
   if (consultation.queue_id) {
-    await ensureQueuePatientContext(pool, {
+    const queueContext = await ensureQueuePatientContext(pool, {
       queueId: Number(consultation.queue_id),
       patientId: consultation.patient_id ? Number(consultation.patient_id) : null,
       doctorUserId: consultation.doctor_id ? Number(consultation.doctor_id) : userId ?? 0,
     });
+    if (queueContext.medical_center_id) {
+      await assertVerifiedClinic(String(queueContext.medical_center_id));
+    }
   }
 
   const result = await pool.query(
@@ -640,9 +652,10 @@ const ensurePrescriptionForConsultation = async (options: {
     id: number;
     qr_code: string | null;
     dispensed_at: string | null;
+    issued_at: string | null;
   }>(
     `
-    SELECT id, qr_code, dispensed_at
+    SELECT id, qr_code, dispensed_at, issued_at
     FROM prescriptions
     WHERE consultation_id = $1
     LIMIT 1
@@ -683,6 +696,7 @@ const ensurePrescriptionForConsultation = async (options: {
     patientId: consultation.patient_id,
     doctorId: consultation.doctor_id,
     medicalCenterId: consultation.medical_center_id ?? null,
+    issuedAt: existingPrescription.rows[0]?.issued_at ?? null,
     qrCode: existingPrescription.rows[0]?.qr_code ?? null,
     isDispensed: Boolean(existingPrescription.rows[0]?.dispensed_at),
   });
@@ -717,7 +731,12 @@ const ensurePrescriptionForConsultation = async (options: {
 export const issuePrescriptionForConsultationRecord = async (
   consultationId: string,
   userId: number,
-  medicines?: any[]
+  input?: {
+    medicines?: any[];
+    symptoms?: string | null;
+    diagnosis?: string | null;
+    notes?: string | null;
+  }
 ) => {
   const client = await pool.connect();
   let committed = false;
@@ -757,13 +776,20 @@ export const issuePrescriptionForConsultationRecord = async (
       doctorUserId: userId,
     });
 
+    if (queueContext.medical_center_id) {
+      await assertVerifiedClinic(String(queueContext.medical_center_id));
+    }
+
     if (queueContext.consultation_id && String(queueContext.consultation_id) !== String(consultation.id)) {
       throw createStatusError("Queue entry is linked to a different consultation", 409, "PATIENT_NOT_CALLED");
     }
 
-    const medsFromBody = Array.isArray(medicines) ? medicines : null;
+    const medsFromBody = Array.isArray(input?.medicines) ? input?.medicines : null;
     const medsFromDb = normalizeMedicineList(consultation.medicines);
     const meds = medsFromBody ?? medsFromDb;
+    const nextSymptoms = input?.symptoms ?? consultation.symptoms ?? null;
+    const nextDiagnosis = input?.diagnosis ?? consultation.diagnosis ?? null;
+    const nextNotes = input?.notes ?? consultation.notes ?? null;
 
     const validationError = validateMedicines(meds, true);
     if (validationError) {
@@ -801,9 +827,9 @@ export const issuePrescriptionForConsultationRecord = async (
         `,
         [
           consultation.id,
-          consultation.symptoms ?? null,
-          consultation.diagnosis ?? null,
-          consultation.notes ?? null,
+          nextSymptoms,
+          nextDiagnosis,
+          nextNotes,
           JSON.stringify(meds),
         ]
       )
@@ -874,7 +900,12 @@ export const issuePrescriptionForConsultationRecord = async (
 export const completeConsultationRecord = async (
   consultationId: string,
   userId: number,
-  medicines?: any[]
+  input?: {
+    medicines?: any[];
+    symptoms?: string | null;
+    diagnosis?: string | null;
+    notes?: string | null;
+  }
 ) => {
   const client = await pool.connect();
   let committed = false;
@@ -914,6 +945,10 @@ export const completeConsultationRecord = async (
       doctorUserId: userId,
     });
 
+    if (queueContext.medical_center_id) {
+      await assertVerifiedClinic(String(queueContext.medical_center_id));
+    }
+
     if (
       queueContext.consultation_id &&
       String(queueContext.consultation_id) !== String(consultation.id)
@@ -921,9 +956,12 @@ export const completeConsultationRecord = async (
       throw createStatusError("Queue entry is linked to a different consultation", 409, "PATIENT_NOT_CALLED");
     }
 
-    const medsFromBody = Array.isArray(medicines) ? medicines : null;
+    const medsFromBody = Array.isArray(input?.medicines) ? input?.medicines : null;
     const medsFromDb = normalizeMedicineList(consultation.medicines);
     const meds = medsFromBody ?? medsFromDb;
+    const nextSymptoms = input?.symptoms ?? consultation.symptoms ?? null;
+    const nextDiagnosis = input?.diagnosis ?? consultation.diagnosis ?? null;
+    const nextNotes = input?.notes ?? consultation.notes ?? null;
 
     if (meds.length > 0) {
       const validationError = validateMedicines(meds, true);
@@ -957,9 +995,9 @@ export const completeConsultationRecord = async (
         `,
         [
           consultation.id,
-          consultation.symptoms ?? null,
-          consultation.diagnosis ?? null,
-          consultation.notes ?? null,
+          nextSymptoms,
+          nextDiagnosis,
+          nextNotes,
           JSON.stringify(meds),
         ]
       )

@@ -1115,6 +1115,14 @@ export const getDoctorScheduleOverview = async (doctorUserId: number, options?: 
         ) bookings ON TRUE
         WHERE s.doctor_user_id = $1
           AND s.date BETWEEN $2::date AND $3::date
+          AND (
+            LOWER(COALESCE(mc.verification_status, 'pending')) = 'approved'
+            OR (
+              LOWER(COALESCE(mc.verification_status, 'pending')) = 'pending'
+              AND LOWER(COALESCE(mc.status, '')) = 'approved'
+            )
+          )
+          AND LOWER(COALESCE(mc.status, 'active')) IN ('active', 'approved')
         ORDER BY s.date ASC, s.start_time ASC
       `,
       [doctorUserId, from, to]

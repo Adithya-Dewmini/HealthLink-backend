@@ -123,7 +123,10 @@ export const listDoctorPrescriptions = async (
   );
 
   return result.rows.map((row) => {
-    const qrMeta = getPrescriptionQrMetadata(row.qr_code);
+    const qrMeta = getPrescriptionQrMetadata(row.qr_code, {
+      issuedAt: row.issued_at ?? row.consultation_created_at ?? null,
+      isDispensed: Boolean(row.dispensed_at),
+    });
     return {
       id: String(row.id),
       consultationId: row.consultation_id ? String(row.consultation_id) : null,
@@ -232,7 +235,10 @@ export const getDoctorPrescriptionDetail = async (
     [prescriptionId]
   );
 
-  const qrMeta = getPrescriptionQrMetadata(row.qr_code);
+  const qrMeta = getPrescriptionQrMetadata(row.qr_code, {
+    issuedAt: row.issued_at ?? row.consultation_created_at ?? null,
+    isDispensed: Boolean(row.dispensed_at),
+  });
 
   return {
     id: String(row.id),

@@ -1,6 +1,6 @@
 import type { RequestHandler } from "express";
 import type { AuthenticatedRequest } from "../types/auth";
-import { assertVerifiedDoctorByUserId } from "../services/verification.service";
+import { assertVerifiedDoctorProfileOnlyByUserId } from "../services/verification.service";
 
 export const requireVerifiedDoctor: RequestHandler = async (req, res, next) => {
   const typedReq = req as AuthenticatedRequest;
@@ -16,7 +16,7 @@ export const requireVerifiedDoctor: RequestHandler = async (req, res, next) => {
   }
 
   try {
-    await assertVerifiedDoctorByUserId(userId);
+    await assertVerifiedDoctorProfileOnlyByUserId(userId);
     return next();
   } catch (error) {
     const appError = error as Error & { statusCode?: number };

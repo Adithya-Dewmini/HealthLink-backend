@@ -1,5 +1,6 @@
 import pool from "../../config/db";
 import type { PoolClient } from "pg";
+import { assertPrescriptionIsValidForUse } from "../../services/prescription.service";
 import { HttpError } from "./errors";
 import {
   getDemandLogsSchema,
@@ -1251,9 +1252,16 @@ export const dispensePrescription = async (input: {
     const prescriptionSchema = await getPrescriptionSchema(client);
     const prescriptionResult = await client.query(
       `
-        SELECT id, status, dispensed_at
-        FROM prescriptions
-        WHERE id = $1
+        SELECT
+          p.id,
+          p.status,
+          p.dispensed_at,
+          p.issued_at,
+          c.created_at AS consultation_created_at
+        FROM prescriptions p
+        LEFT JOIN consultations c
+          ON c.id = p.consultation_id
+        WHERE p.id = $1
         FOR UPDATE
       `,
       [input.prescriptionId]
@@ -1478,6 +1486,10 @@ export const dispensePrescriptionById = async (input: {
     ) {
       throw new HttpError(409, "Prescription has already been dispensed");
     }
+
+    assertPrescriptionIsValidForUse(
+      prescriptionRow.issued_at ?? prescriptionRow.consultation_created_at ?? null
+    );
 
     const itemsResult = await client.query(
       `

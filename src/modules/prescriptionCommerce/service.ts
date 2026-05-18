@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import { HttpError } from "../pharmacy/errors";
 import { fetchPharmacyProfileByUserId } from "../pharmacy/service";
 import { getInventorySchema, quoteIdent } from "../pharmacy/schema";
+import { assertPrescriptionIsValidForUse } from "../../services/prescription.service";
 import type { DeliveryAddress, OrderStatus, PaymentMethod } from "../orders/types";
 import type {
   CreatePrescriptionOrderInput,
@@ -24,6 +25,8 @@ type PrescriptionCommerceRow = {
   status: string | null;
   dispensed_at: string | Date | null;
   patient_id: string | number;
+  issued_at: string | Date | null;
+  consultation_created_at: string | Date | null;
 };
 
 const normalizeMoney = (value: unknown) => Number(Number(value ?? 0).toFixed(2));
@@ -94,6 +97,8 @@ const getPrescriptionForPatient = async (
         p.id,
         p.status,
         p.dispensed_at,
+        p.issued_at,
+        c.created_at AS consultation_created_at,
         c.patient_id
       FROM prescriptions p
       JOIN consultations c ON c.id = p.consultation_id
@@ -112,6 +117,8 @@ const getPrescriptionForPatient = async (
   if (Boolean(row.dispensed_at) || String(row.status || "").toLowerCase() === "completed") {
     throw new HttpError(409, "Prescription has already been fully dispensed");
   }
+
+  assertPrescriptionIsValidForUse(row.issued_at ?? row.consultation_created_at ?? null);
 
   return row;
 };

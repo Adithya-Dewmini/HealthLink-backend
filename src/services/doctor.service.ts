@@ -3,6 +3,17 @@ import { env } from "../config/env";
 import { markInvalidClinicSchedulesForDoctor } from "./schedule.service";
 import { BOOKING_STATUS } from "../utils/bookingLifecycle";
 
+const APPROVED_CENTER_SQL = `
+  (
+    LOWER(COALESCE(mc.verification_status, 'pending')) = 'approved'
+    OR (
+      LOWER(COALESCE(mc.verification_status, 'pending')) = 'pending'
+      AND LOWER(COALESCE(mc.status, '')) = 'approved'
+    )
+  )
+  AND LOWER(COALESCE(mc.status, 'active')) IN ('active', 'approved')
+`;
+
 export type DoctorAvailabilityInput = {
   day: string;
   startTime: string;
@@ -405,9 +416,11 @@ export const getDoctorDashboardData = async (userId: number) => {
           (
             SELECT COUNT(*)::int
             FROM medical_center_doctor_schedule s
+            JOIN medical_centers mc ON mc.id = s.medical_center_id
             WHERE s.doctor_profile_id = $1
               AND s.date = ${APP_DATE_SQL}
               AND s.is_active = TRUE
+              AND ${APPROVED_CENTER_SQL}
           ) AS session_count,
           (
             SELECT COUNT(*)::int
@@ -428,8 +441,10 @@ export const getDoctorDashboardData = async (userId: number) => {
           (
             SELECT COUNT(*)::int
             FROM medical_center_doctor_schedule s
+            JOIN medical_centers mc ON mc.id = s.medical_center_id
             WHERE s.doctor_profile_id = $1
               AND s.is_active = TRUE
+              AND ${APPROVED_CENTER_SQL}
               AND (
                 s.date > ${APP_DATE_SQL}
                 OR (s.date = ${APP_DATE_SQL} AND s.start_time > ${APP_TIME_SQL})
@@ -452,9 +467,12 @@ export const getDoctorDashboardData = async (userId: number) => {
         `
         SELECT COUNT(*)::int AS live_count
         FROM queues q
+        LEFT JOIN medical_center_doctor_schedule s ON s.id = q.schedule_id
+        LEFT JOIN medical_centers mc ON mc.id = COALESCE(q.medical_center_id, s.medical_center_id)
         WHERE q.doctor_id = $1
           AND q.shift_date = ${APP_DATE_SQL}
           AND q.status IN ('LIVE', 'PAUSED')
+          AND ${APPROVED_CENTER_SQL}
         `,
         [doctorId]
       ),
@@ -493,6 +511,7 @@ export const getDoctorDashboardData = async (userId: number) => {
           WHERE q.doctor_id = $1
             AND q.shift_date = ${APP_DATE_SQL}
             AND q.status IN ('LIVE', 'PAUSED')
+            AND ${APPROVED_CENTER_SQL}
           ORDER BY COALESCE(q.started_at, q.created_at) DESC, q.id DESC
           LIMIT 1
         )
@@ -574,6 +593,7 @@ export const getDoctorDashboardData = async (userId: number) => {
         LEFT JOIN medical_centers mc ON mc.id = s.medical_center_id
         WHERE s.doctor_profile_id = $1
           AND s.is_active = TRUE
+          AND ${APPROVED_CENTER_SQL}
           AND (
             s.date > ${APP_DATE_SQL}
             OR (s.date = ${APP_DATE_SQL} AND s.start_time > ${APP_TIME_SQL})
@@ -738,6 +758,7 @@ export const getDoctorQueueDashboardData = async (
           JOIN medical_centers mc ON mc.id = s.medical_center_id
           WHERE s.id = $1
             AND s.doctor_profile_id = $2
+            AND ${APPROVED_CENTER_SQL}
           LIMIT 1
           `,
           [requestedScheduleId, doctorId]
@@ -750,14 +771,17 @@ export const getDoctorQueueDashboardData = async (
 
   const queueResult = await pool.query(
     `
-    SELECT *
-    FROM queues
-    WHERE doctor_id = $1
-      AND shift_date = ${APP_DATE_SQL}
-      AND ($2::int IS NULL OR schedule_id = $2)
+    SELECT q.*
+    FROM queues q
+    LEFT JOIN medical_center_doctor_schedule s ON s.id = q.schedule_id
+    LEFT JOIN medical_centers mc ON mc.id = COALESCE(q.medical_center_id, s.medical_center_id)
+    WHERE q.doctor_id = $1
+      AND q.shift_date = ${APP_DATE_SQL}
+      AND ($2::int IS NULL OR q.schedule_id = $2)
+      AND ${APPROVED_CENTER_SQL}
     ORDER BY
-      CASE WHEN status IN ('LIVE', 'PAUSED') THEN 0 ELSE 1 END,
-      created_at DESC
+      CASE WHEN q.status IN ('LIVE', 'PAUSED') THEN 0 ELSE 1 END,
+      q.created_at DESC
     LIMIT 1
     `,
     [doctorId, requestedScheduleId]
